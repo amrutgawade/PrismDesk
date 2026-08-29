@@ -1,0 +1,6 @@
+# Phase 0 builds on the self-contained GNU toolchain (bundled linker, no VS Build
+# Tools required). This validates the windows-rs Media Foundation / D3D11 link
+# path the plan depends on. We migrate to x86_64-pc-windows-msvc before Phase 5
+# (WebView2 dashboard), which needs the MSVC linker + Windows SDK.
+[toolchain]
+channel = "stable-x86_64-pc-windows-gnu"

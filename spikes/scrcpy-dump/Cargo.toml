@@ -1,0 +1,13 @@
+[package]
+name = "scrcpy-dump"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# Phase-0 Spike B: push the pinned scrcpy 3.3.1 server via the bundled adb, set
+# up an `adb reverse` tunnel, read the video socket, and dump the raw H.264
+# elementary stream to a file. Pure Rust + std::net + the adb CLI — no native
+# deps. Runnable once an Android device with USB debugging is connected.
+[dependencies]

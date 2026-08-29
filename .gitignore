@@ -1,0 +1,22 @@
+# Rust
+/target
+**/target
+Cargo.lock.bak
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+
+# Phase-0 spike capture output
+*.h264
+*.h265
+*.raw
+/captures/
+
+# Local secrets / signing
+*.pfx
+*.snk
+.env
