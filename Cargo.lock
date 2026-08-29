@@ -11,6 +11,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "pd-engine"
+version = "0.1.0"
+dependencies = [
+ "pd-render",
+ "windows-core",
+]
+
+[[package]]
+name = "pd-render"
+version = "0.1.0"
+dependencies = [
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,15 @@
+[package]
+name = "pd-engine"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "pd-engine"
+path = "src/main.rs"
+
+[dependencies]
+pd-render = { path = "../pd-render" }
+windows-core.workspace = true

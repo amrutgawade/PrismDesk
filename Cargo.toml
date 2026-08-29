@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "spikes/mf-smoke",
     "spikes/scrcpy-dump",
+    "crates/pd-render",
+    "crates/pd-engine",
 ]
 
 # Shared dependency versions for the whole workspace.
