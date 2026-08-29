@@ -11,9 +11,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pd-decode"
+version = "0.1.0"
+dependencies = [
+ "pd-render",
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "pd-engine"
 version = "0.1.0"
 dependencies = [
+ "pd-decode",
  "pd-render",
  "windows-core",
 ]

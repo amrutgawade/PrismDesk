@@ -29,6 +29,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_DESTROY, WM_QUIT, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
+mod video;
+use video::Video;
+
 const VENDOR_NVIDIA: u32 = 0x10DE;
 
 /// The dedicated mirror window + its D3D11 device and flip-model swapchain.
@@ -40,13 +43,14 @@ pub struct Mirror {
     rtv: Option<ID3D11RenderTargetView>,
     size: (u32, u32),
     adapter_name: String,
+    video: Option<Video>,
 }
 
 impl Mirror {
     /// Create the window and swapchain. `size` is the initial client size.
     pub fn new(width: u32, height: u32, title: &str) -> Result<Self> {
         let hwnd = unsafe { create_window(width, height, title)? };
-        let (device, context, adapter, adapter_name) = unsafe { create_device_on_nvidia()? };
+        let (device, context, adapter, adapter_name) = unsafe { nvidia_device()? };
         let swapchain = unsafe { create_swapchain(&device, &adapter, hwnd)? };
 
         let mut me = Self {
@@ -57,6 +61,7 @@ impl Mirror {
             rtv: None,
             size: (width.max(1), height.max(1)),
             adapter_name,
+            video: None,
         };
         unsafe { me.create_rtv()? };
         unsafe { ShowWindow(hwnd, SW_SHOW).ok().ok() };
@@ -69,6 +74,16 @@ impl Mirror {
 
     pub fn hwnd(&self) -> HWND {
         self.hwnd
+    }
+
+    /// The D3D11 device this window renders with. The decoder must share it so
+    /// decoded NV12 textures can be sampled without leaving the GPU.
+    pub fn device(&self) -> &ID3D11Device {
+        &self.device
+    }
+
+    pub fn context(&self) -> &ID3D11DeviceContext {
+        &self.context
     }
 
     /// Pump queued window messages. Returns true when the window is closing.
@@ -95,6 +110,36 @@ impl Mirror {
                 self.context.ClearRenderTargetView(rtv, &clear);
             }
             // Vsync present for milestone 1a; waitable + tearing/VRR arrive in 1e.
+            self.swapchain.Present(1, DXGI_PRESENT(0)).ok()?;
+        }
+        Ok(())
+    }
+
+    /// Render one decoded NV12 frame (letterboxed) and present. `src` is the
+    /// decoder's NV12 texture, `src_sub` its array slice, `(vw,vh)` its size.
+    pub fn render_frame(
+        &mut self,
+        src: &ID3D11Texture2D,
+        src_sub: u32,
+        vw: u32,
+        vh: u32,
+    ) -> Result<()> {
+        unsafe {
+            self.maybe_resize()?;
+            let device = self.device.clone();
+            let context = self.context.clone();
+            let rtv = match &self.rtv {
+                Some(r) => r.clone(),
+                None => return Ok(()),
+            };
+            if self.video.is_none() {
+                self.video = Some(Video::new(&device)?);
+            }
+            let size = self.size;
+            self.video
+                .as_mut()
+                .unwrap()
+                .draw(&device, &context, &rtv, size, src, src_sub, (vw, vh))?;
             self.swapchain.Present(1, DXGI_PRESENT(0)).ok()?;
         }
         Ok(())
@@ -186,8 +231,9 @@ unsafe fn create_window(width: u32, height: u32, title: &str) -> Result<HWND> {
 }
 
 /// Create a D3D11 device pinned to the NVIDIA discrete GPU (not the AMD iGPU /
-/// spacedesk). Returns (device, context, adapter, adapter name).
-unsafe fn create_device_on_nvidia(
+/// spacedesk). Returns (device, context, adapter, adapter name). Public so the
+/// decoder and other subsystems can share one NVIDIA device.
+pub unsafe fn nvidia_device(
 ) -> Result<(ID3D11Device, ID3D11DeviceContext, IDXGIAdapter1, String)> {
     let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
     let mut chosen: Option<(IDXGIAdapter1, String)> = None;
