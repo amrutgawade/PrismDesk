@@ -4,8 +4,8 @@
 //! GPU. This is the OBS-capturable surface (WGC). Milestone 1a presents a solid
 //! clear color; NV12->RGB video rendering lands in milestone 1c.
 
-use windows::core::{w, Result};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::core::{w, Interface, Result};
+use windows::Win32::Foundation::{BOOL, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
@@ -18,9 +18,11 @@ use windows::Win32::Graphics::Dxgi::Common::{
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIFactory2, IDXGISwapChain1,
-    DXGI_ADAPTER_DESC1, DXGI_PRESENT, DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1,
-    DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
+    IDXGISwapChain2, DXGI_ADAPTER_DESC1, DXGI_PRESENT, DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1,
+    DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, DXGI_SWAP_EFFECT_FLIP_DISCARD,
+    DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
+use windows::Win32::System::Threading::WaitForSingleObjectEx;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::Win32::Graphics::Gdi::{
@@ -58,6 +60,7 @@ pub struct Mirror {
     rtv: Option<ID3D11RenderTargetView>,
     size: (u32, u32),
     adapter_name: String,
+    waitable: HANDLE,
     video: Option<Video>,
     fullscreen: bool,
     saved: Option<(isize, RECT)>,
@@ -74,6 +77,13 @@ impl Mirror {
         let hwnd = unsafe { create_window(width, height, title)? };
         let (device, context, adapter, adapter_name) = unsafe { nvidia_device()? };
         let swapchain = unsafe { create_swapchain(&device, &adapter, hwnd)? };
+        // Frame-latency-1 waitable swapchain: block on this before rendering so
+        // the CPU can't queue ahead — minimum present latency while staying vsync.
+        let waitable = unsafe {
+            let sc2: IDXGISwapChain2 = swapchain.cast()?;
+            sc2.SetMaximumFrameLatency(1)?;
+            sc2.GetFrameLatencyWaitableObject()
+        };
 
         let mut me = Self {
             hwnd,
@@ -83,6 +93,7 @@ impl Mirror {
             rtv: None,
             size: (width.max(1), height.max(1)),
             adapter_name,
+            waitable,
             video: None,
             fullscreen: false,
             saved: None,
@@ -174,6 +185,7 @@ impl Mirror {
     /// an NV12->RGB draw.)
     pub fn present(&mut self, clear: [f32; 4]) -> Result<()> {
         unsafe {
+            WaitForSingleObjectEx(self.waitable, 1000, BOOL(0));
             self.maybe_resize()?;
             if let Some(rtv) = &self.rtv {
                 self.context.ClearRenderTargetView(rtv, &clear);
@@ -194,6 +206,7 @@ impl Mirror {
         vh: u32,
     ) -> Result<()> {
         unsafe {
+            WaitForSingleObjectEx(self.waitable, 1000, BOOL(0));
             self.maybe_resize()?;
             let device = self.device.clone();
             let context = self.context.clone();
@@ -235,7 +248,13 @@ impl Mirror {
         self.rtv = None;
         self.context.ClearState();
         self.swapchain
-            .ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0))?;
+            .ResizeBuffers(
+                0,
+                w,
+                h,
+                DXGI_FORMAT_UNKNOWN,
+                DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
+            )?;
         self.size = (w, h);
         self.create_rtv()?;
         Ok(())
@@ -362,7 +381,7 @@ unsafe fn create_swapchain(
         Scaling: DXGI_SCALING_NONE,
         SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
         AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-        Flags: 0,
+        Flags: DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32,
     };
     factory.CreateSwapChainForHwnd(device, hwnd, &desc, None, None)
 }
