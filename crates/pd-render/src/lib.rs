@@ -21,13 +21,28 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_ADAPTER_DESC1, DXGI_PRESENT, DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1,
     DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, LoadCursorW,
-    PeekMessageW, PostQuitMessage, RegisterClassExW, ShowWindow, TranslateMessage, CS_HREDRAW,
-    CS_VREDRAW, CW_USEDEFAULT, IDC_ARROW, MSG, PM_REMOVE, SW_SHOW, WINDOW_EX_STYLE, WM_CLOSE,
-    WM_DESTROY, WM_QUIT, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::HiDpi::{
+    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
+    GetWindowLongPtrW, GetWindowRect, LoadCursorW, PeekMessageW, PostQuitMessage, RegisterClassExW,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
+    CW_USEDEFAULT, GWL_STYLE, HWND_TOP, IDC_ARROW, MSG, PM_REMOVE, SWP_FRAMECHANGED,
+    SWP_NOOWNERZORDER, SW_SHOW, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_QUIT,
+    WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+};
+
+const VK_F11: usize = 0x7A;
+
+/// Set by the window proc on F11; consumed by `pump` to toggle fullscreen.
+static TOGGLE_FS: AtomicBool = AtomicBool::new(false);
 
 mod video;
 use video::Video;
@@ -44,11 +59,18 @@ pub struct Mirror {
     size: (u32, u32),
     adapter_name: String,
     video: Option<Video>,
+    fullscreen: bool,
+    saved: Option<(isize, RECT)>,
 }
 
 impl Mirror {
     /// Create the window and swapchain. `size` is the initial client size.
     pub fn new(width: u32, height: u32, title: &str) -> Result<Self> {
+        // Per-Monitor-V2 DPI awareness: back-buffer sized in physical pixels, so
+        // Windows never bitmap-stretches (blurs) the window under >100% scaling.
+        unsafe {
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
         let hwnd = unsafe { create_window(width, height, title)? };
         let (device, context, adapter, adapter_name) = unsafe { nvidia_device()? };
         let swapchain = unsafe { create_swapchain(&device, &adapter, hwnd)? };
@@ -62,6 +84,8 @@ impl Mirror {
             size: (width.max(1), height.max(1)),
             adapter_name,
             video: None,
+            fullscreen: false,
+            saved: None,
         };
         unsafe { me.create_rtv()? };
         unsafe { ShowWindow(hwnd, SW_SHOW).ok().ok() };
@@ -87,7 +111,7 @@ impl Mirror {
     }
 
     /// Pump queued window messages. Returns true when the window is closing.
-    pub fn pump(&self) -> bool {
+    pub fn pump(&mut self) -> bool {
         unsafe {
             let mut msg = MSG::default();
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
@@ -97,8 +121,53 @@ impl Mirror {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
+            if TOGGLE_FS.swap(false, Ordering::Relaxed) {
+                self.toggle_fullscreen();
+            }
         }
         false
+    }
+
+    /// Toggle borderless fullscreen (F11). Flip-model borderless keeps DWM
+    /// composition + OBS WGC working, unlike exclusive fullscreen.
+    unsafe fn toggle_fullscreen(&mut self) {
+        if !self.fullscreen {
+            let style = GetWindowLongPtrW(self.hwnd, GWL_STYLE);
+            let mut rect = RECT::default();
+            let _ = GetWindowRect(self.hwnd, &mut rect);
+            let mon = MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut mi = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if GetMonitorInfoW(mon, &mut mi).as_bool() {
+                self.saved = Some((style, rect));
+                SetWindowLongPtrW(self.hwnd, GWL_STYLE, (WS_POPUP | WS_VISIBLE).0 as isize);
+                let rc = mi.rcMonitor;
+                let _ = SetWindowPos(
+                    self.hwnd,
+                    HWND_TOP,
+                    rc.left,
+                    rc.top,
+                    rc.right - rc.left,
+                    rc.bottom - rc.top,
+                    SWP_FRAMECHANGED | SWP_NOOWNERZORDER,
+                );
+                self.fullscreen = true;
+            }
+        } else if let Some((style, rect)) = self.saved.take() {
+            SetWindowLongPtrW(self.hwnd, GWL_STYLE, style);
+            let _ = SetWindowPos(
+                self.hwnd,
+                HWND_TOP,
+                rect.left,
+                rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+                SWP_FRAMECHANGED | SWP_NOOWNERZORDER,
+            );
+            self.fullscreen = false;
+        }
     }
 
     /// Clear the back buffer and present. (Milestone 1c replaces the clear with
@@ -191,6 +260,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             WM_CLOSE => {
                 let _ = DestroyWindow(hwnd);
                 LRESULT(0)
+            }
+            WM_KEYDOWN => {
+                if wparam.0 == VK_F11 {
+                    TOGGLE_FS.store(true, Ordering::Relaxed);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }

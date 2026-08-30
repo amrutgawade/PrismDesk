@@ -13,11 +13,149 @@ use std::time::{Duration, Instant};
 use pd_decode::Decoder;
 use pd_render::Mirror;
 
-fn main() -> windows_core::Result<()> {
-    match std::env::args().nth(1).as_deref() {
-        Some("blank") => blank_demo(),
-        _ => play_capture(),
+mod transport;
+
+/// Live capture/quality configuration (the product's resolution/fps/quality
+/// controls). Defaults = the verified "Balanced" preset: 1600 long-edge source
+/// (supersamples a 1080p panel), H.264 (lowest latency), 20 Mbps, 60 fps.
+struct Config {
+    max_size: u32,
+    bitrate: u32,
+    fps: u32,
+    codec: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self { max_size: 1600, bitrate: 20_000_000, fps: 60, codec: "h264".into() }
     }
+}
+
+fn main() -> windows_core::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("blank") => blank_demo(),               // 1a: animated clear
+        Some("file") => play_capture(),              // 1c: play the canned capture
+        _ => live_mirror(parse_config(&args)),       // 1d: live mirror (USB)
+    }
+}
+
+fn parse_config(args: &[String]) -> Config {
+    let mut c = Config::default();
+    // Presets first so explicit flags can still override them.
+    if let Some(p) = flag_value(args, "--preset") {
+        match p.as_str() {
+            "crisp" | "reading" => {
+                c = Config { max_size: 1920, bitrate: 28_000_000, fps: 60, codec: "h265".into() }
+            }
+            "lowlatency" | "low" => {
+                c = Config { max_size: 1366, bitrate: 15_000_000, fps: 90, codec: "h264".into() }
+            }
+            _ => {} // "balanced" == defaults
+        }
+    }
+    if let Some(v) = flag_value(args, "--max-size").and_then(|s| s.parse().ok()) {
+        c.max_size = v;
+    }
+    if let Some(v) = flag_value(args, "--bitrate").and_then(|s| s.parse::<u32>().ok()) {
+        c.bitrate = v * 1_000_000; // Mbps -> bps
+    }
+    if let Some(v) = flag_value(args, "--fps").and_then(|s| s.parse().ok()) {
+        c.fps = v;
+    }
+    if let Some(v) = flag_value(args, "--codec") {
+        c.codec = v;
+    }
+    c
+}
+
+fn flag_value(args: &[String], name: &str) -> Option<String> {
+    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
+}
+
+/// Phase 1d — live mirror. Bring up the reverse-tunnel video session, read
+/// framed access units on a net thread, and decode+present on the main thread
+/// with present-on-arrival + drop-to-latest so latency can never accumulate.
+fn live_mirror(cfg: Config) -> windows_core::Result<()> {
+    use std::sync::mpsc;
+
+    let (session, stream) = match transport::start(cfg.max_size, cfg.bitrate, cfg.fps, &cfg.codec) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[transport] {e}");
+            std::process::exit(1);
+        }
+    };
+    println!("PrismDesk · live mirror (USB, adb reverse)");
+    println!(
+        "  {} · max_size={} · {} Mbps · {} fps",
+        cfg.codec, cfg.max_size, cfg.bitrate / 1_000_000, cfg.fps
+    );
+
+    let (tx, rx) = mpsc::channel::<transport::Au>();
+    let mut netstream = stream;
+    let net = std::thread::spawn(move || loop {
+        match transport::read_frame(&mut netstream) {
+            Ok(au) => {
+                if tx.send(au).is_err() {
+                    break;
+                }
+            }
+            Err(_) => break, // EOF / disconnect
+        }
+    });
+
+    // Open large (~1040 tall) to use most of a 1080p panel; letterbox handles aspect.
+    let mut mirror = Mirror::new(500, 1040, "PrismDesk — Live Mirror")?;
+    let mut dec = Decoder::new(mirror.device())?;
+    println!("  decoding on {} · F11 = fullscreen · close the window to stop", mirror.adapter_name());
+
+    let mut out = Vec::new();
+    let mut frames = 0u64;
+    let start = Instant::now();
+
+    loop {
+        if mirror.pump() {
+            break;
+        }
+        // Drain all queued access units: decode every one (keeps the decoder in
+        // sync) but keep only the newest decoded frame to present.
+        let mut latest = None;
+        let mut disconnected = false;
+        loop {
+            match rx.try_recv() {
+                Ok(au) => {
+                    if let Err(e) = dec.decode(&au.data, au.pts_100ns, &mut out) {
+                        eprintln!("[decode] {e:?}");
+                    }
+                    for f in out.drain(..) {
+                        latest = Some(f); // older frames drop -> back to the pool
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+        if let Some(f) = latest.take() {
+            mirror.render_frame(&f.texture, f.subresource, f.width, f.height)?;
+            frames += 1;
+        } else {
+            std::thread::sleep(Duration::from_millis(1)); // idle, avoid busy-spin
+        }
+        if disconnected {
+            println!("[transport] stream ended");
+            break;
+        }
+    }
+
+    drop(session); // kill the server + remove the reverse tunnel
+    let _ = net.join();
+    let secs = start.elapsed().as_secs_f32().max(0.001);
+    println!("[ok] live mirror: {frames} frames in {secs:.1}s ({:.0} fps)", frames as f32 / secs);
+    Ok(())
 }
 
 fn play_capture() -> windows_core::Result<()> {
@@ -61,9 +199,8 @@ fn play_capture() -> windows_core::Result<()> {
             shown += 1;
             std::thread::sleep(target_dt);
         }
-        if start.elapsed() > Duration::from_secs(12) {
-            break;
-        }
+        // Loop the capture until the window is closed so you can inspect it.
+        let _ = start;
         // Re-create the decoder to replay the file cleanly after DRAIN.
         dec = Decoder::new(mirror.device())?;
     }
