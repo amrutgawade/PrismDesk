@@ -28,6 +28,7 @@ struct Config {
     fps: u32,
     codec: String,
     audio: bool,
+    input: bool,
     serial: Option<String>,
 }
 
@@ -39,6 +40,7 @@ impl Default for Config {
             fps: 60,
             codec: "h264".into(),
             audio: true,
+            input: true,
             serial: None,
         }
     }
@@ -89,6 +91,7 @@ fn parse_config(args: &[String]) -> Config {
                     fps: 60,
                     codec: "h265".into(),
                     audio: c.audio,
+                    input: c.input,
                     serial: c.serial.clone(),
                 }
             }
@@ -99,6 +102,7 @@ fn parse_config(args: &[String]) -> Config {
                     fps: 90,
                     codec: "h264".into(),
                     audio: c.audio,
+                    input: c.input,
                     serial: c.serial.clone(),
                 }
             }
@@ -122,6 +126,9 @@ fn parse_config(args: &[String]) -> Config {
     }
     if args.iter().any(|a| a == "--no-audio") {
         c.audio = false;
+    }
+    if args.iter().any(|a| a == "--no-control") {
+        c.input = false;
     }
     c
 }
@@ -178,7 +185,7 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
             cfg.fps,
             &codec,
             want_audio,
-            true, // control (mouse) on
+            cfg.input, // mouse/keyboard control
             cfg.serial.clone(),
         ) {
             Ok(s) => {

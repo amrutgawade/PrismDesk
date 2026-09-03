@@ -102,13 +102,23 @@ fn setup_style(ctx: &egui::Context) {
     ctx.set_style(style);
 }
 
+struct DevSettings {
+    preset: usize,
+    audio: bool,
+    input: bool,
+}
+impl Default for DevSettings {
+    fn default() -> Self {
+        Self { preset: 0, audio: true, input: true }
+    }
+}
+
 struct Dashboard {
     devices: Vec<Device>,
     last_refresh: Instant,
-    preset: usize,
-    audio: bool,
     status: String,
-    running: HashMap<String, Child>, // serial -> live mirror process
+    running: HashMap<String, Child>,       // serial -> live mirror process
+    settings: HashMap<String, DevSettings>, // serial -> per-device config
 }
 
 impl Dashboard {
@@ -116,10 +126,9 @@ impl Dashboard {
         let mut d = Self {
             devices: Vec::new(),
             last_refresh: Instant::now() - Duration::from_secs(10),
-            preset: 0,
-            audio: true,
             status: String::new(),
             running: HashMap::new(),
+            settings: HashMap::new(),
         };
         d.refresh();
         d
@@ -133,15 +142,19 @@ impl Dashboard {
     }
 
     fn start_mirror(&mut self, serial: &str) {
+        let s = self.settings.entry(serial.to_string()).or_default();
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pd-engine"));
         let mut cmd = Command::new(exe);
         cmd.arg("--mirror")
             .arg("--serial")
             .arg(serial)
             .arg("--preset")
-            .arg(PRESETS[self.preset]);
-        if !self.audio {
+            .arg(PRESETS[s.preset]);
+        if !s.audio {
             cmd.arg("--no-audio");
+        }
+        if !s.input {
+            cmd.arg("--no-control");
         }
         match cmd.spawn() {
             Ok(child) => {
@@ -181,23 +194,7 @@ impl eframe::App for Dashboard {
                 });
                 ui.label(RichText::new("Android screen mirroring").color(DIM));
                 accent_rule(ui);
-                ui.add_space(10.0);
-
-                // Quality settings
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Quality").color(DIM));
-                    egui::ComboBox::from_id_salt("preset")
-                        .selected_text(PRESETS[self.preset])
-                        .show_ui(ui, |ui| {
-                            for (i, p) in PRESETS.iter().enumerate() {
-                                ui.selectable_value(&mut self.preset, i, *p);
-                            }
-                        });
-                    ui.add_space(8.0);
-                    ui.checkbox(&mut self.audio, RichText::new("Audio").color(TEXT));
-                });
-
-                ui.add_space(14.0);
+                ui.add_space(12.0);
                 ui.label(RichText::new("DEVICES").small().color(DIM).strong());
                 ui.add_space(6.0);
 
@@ -267,6 +264,25 @@ impl eframe::App for Dashboard {
                                     },
                                 );
                             });
+                            if d.authorized {
+                                ui.add_space(8.0);
+                                let running = self.running.contains_key(&d.serial);
+                                let s = self.settings.entry(d.serial.clone()).or_default();
+                                ui.add_enabled_ui(!running, |ui| {
+                                    ui.horizontal(|ui| {
+                                        egui::ComboBox::from_id_salt(("p", d.serial.as_str()))
+                                            .selected_text(PRESETS[s.preset])
+                                            .width(120.0)
+                                            .show_ui(ui, |ui| {
+                                                for (i, p) in PRESETS.iter().enumerate() {
+                                                    ui.selectable_value(&mut s.preset, i, *p);
+                                                }
+                                            });
+                                        ui.checkbox(&mut s.audio, RichText::new("Audio").color(TEXT));
+                                        ui.checkbox(&mut s.input, RichText::new("Input").color(TEXT));
+                                    });
+                                });
+                            }
                         });
                     ui.add_space(8.0);
                 }
