@@ -42,9 +42,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 const VK_F11: usize = 0x7A;
+const VK_M: usize = 0x4D;
 
 /// Set by the window proc on F11; consumed by `pump` to toggle fullscreen.
 static TOGGLE_FS: AtomicBool = AtomicBool::new(false);
+/// Set by the window proc on M; consumed by the engine to toggle audio mute.
+static TOGGLE_MUTE: AtomicBool = AtomicBool::new(false);
 
 mod video;
 use video::Video;
@@ -109,6 +112,11 @@ impl Mirror {
 
     pub fn hwnd(&self) -> HWND {
         self.hwnd
+    }
+
+    /// True once if the user pressed M since the last check (audio mute toggle).
+    pub fn mute_toggled(&self) -> bool {
+        TOGGLE_MUTE.swap(false, Ordering::Relaxed)
     }
 
     /// The D3D11 device this window renders with. The decoder must share it so
@@ -283,6 +291,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             WM_KEYDOWN => {
                 if wparam.0 == VK_F11 {
                     TOGGLE_FS.store(true, Ordering::Relaxed);
+                } else if wparam.0 == VK_M {
+                    TOGGLE_MUTE.store(true, Ordering::Relaxed);
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }

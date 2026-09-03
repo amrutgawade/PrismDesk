@@ -83,9 +83,23 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
     let mut mirror = Mirror::new(500, 1040, "PrismDesk — Live Mirror")?;
     println!("PrismDesk · live mirror (USB, adb reverse)");
     println!(
-        "  {} · max_size={} · {} Mbps · {} fps · F11 fullscreen · close window to stop",
+        "  {} · max_size={} · {} Mbps · {} fps · F11 fullscreen · M mute · close window to stop",
         cfg.codec, cfg.max_size, cfg.bitrate / 1_000_000, cfg.fps
     );
+
+    // Audio output (kept alive for the whole session); disabled if no endpoint.
+    let player = pd_audio::Player::new();
+    let sink = match &player {
+        Ok(p) => {
+            println!("[audio] {}", p.info());
+            Some(p.sink())
+        }
+        Err(e) => {
+            eprintln!("[audio] disabled: {e}");
+            None
+        }
+    };
+    let want_audio = sink.is_some();
 
     let mut backoff = Duration::from_millis(200);
     let cap = Duration::from_secs(5);
@@ -93,13 +107,13 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
     'session: loop {
         // Bring up a session; on failure (device unplugged/sleeping) retry with
         // bounded backoff while the window stays responsive.
-        let (session, stream) = match transport::start(cfg.max_size, cfg.bitrate, cfg.fps, &cfg.codec)
-        {
-            Ok(s) => {
-                backoff = Duration::from_millis(200);
-                println!("[transport] connected");
-                s
-            }
+        let (session, stream, audio_stream) =
+            match transport::start(cfg.max_size, cfg.bitrate, cfg.fps, &cfg.codec, want_audio) {
+                Ok(s) => {
+                    backoff = Duration::from_millis(200);
+                    println!("[transport] connected");
+                    s
+                }
             Err(e) => {
                 eprintln!("[transport] {e} — retry in {:.1}s", backoff.as_secs_f32());
                 if pump_for(&mut mirror, backoff) {
@@ -123,6 +137,17 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
             }
         });
 
+        // Audio producer: raw PCM off the audio socket -> sink; ends on close.
+        let audio_net = match (audio_stream, sink.clone()) {
+            (Some(mut a), Some(sk)) => Some(std::thread::spawn(move || loop {
+                match transport::read_frame(&mut a) {
+                    Ok(au) => sk.push_pcm_s16(&au.data),
+                    Err(_) => break,
+                }
+            })),
+            _ => None,
+        };
+
         let mut dec = Decoder::new(mirror.device())?;
         let mut out = Vec::new();
 
@@ -130,6 +155,11 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
         let user_quit = 'stream: loop {
             if mirror.pump() {
                 break 'stream true;
+            }
+            if mirror.mute_toggled() {
+                if let Some(sk) = &sink {
+                    println!("[audio] {}", if sk.toggle_mute() { "muted" } else { "unmuted" });
+                }
             }
             let mut latest = None;
             loop {
@@ -155,6 +185,9 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
 
         drop(session); // kill the server + remove the reverse tunnel
         let _ = net.join();
+        if let Some(h) = audio_net {
+            let _ = h.join();
+        }
 
         if user_quit {
             break 'session;

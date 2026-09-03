@@ -13,4 +13,5 @@ path = "src/main.rs"
 [dependencies]
 pd-render = { path = "../pd-render" }
 pd-decode = { path = "../pd-decode" }
+pd-audio = { path = "../pd-audio" }
 windows-core.workspace = true

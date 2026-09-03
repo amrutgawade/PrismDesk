@@ -5,6 +5,7 @@ members = [
     "spikes/scrcpy-dump",
     "crates/pd-render",
     "crates/pd-decode",
+    "crates/pd-audio",
     "crates/pd-engine",
 ]
 

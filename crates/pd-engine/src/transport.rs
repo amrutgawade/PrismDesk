@@ -62,7 +62,8 @@ pub fn start(
     bitrate: u32,
     fps: u32,
     codec: &str,
-) -> Result<(Session, TcpStream), String> {
+    audio_on: bool,
+) -> Result<(Session, TcpStream, Option<TcpStream>), String> {
     let jar = server_jar();
     if !jar.exists() {
         return Err(format!("pinned server jar not found at {}", jar.display()));
@@ -103,7 +104,8 @@ pub fn start(
         &format!("scid={scid}"),
         "log_level=info",
         "tunnel_forward=false",
-        "audio=false",
+        &format!("audio={audio_on}"),
+        "audio_codec=raw", // 48 kHz stereo s16le PCM, no decode needed
         "control=false",
         "cleanup=true",
         &format!("video_codec={codec}"),
@@ -123,16 +125,28 @@ pub fn start(
         .map_err(|e| format!("spawn server: {e}"))?;
     let server_guard = ChildGuard(child.into());
 
-    let stream = accept(&listener, Duration::from_secs(5))
+    // scrcpy dials out in order: video, then audio (if enabled).
+    let video = accept(&listener, Duration::from_secs(5))
         .ok_or_else(|| "device never connected back (reverse tunnel)".to_string())?;
-    stream.set_nodelay(true).ok(); // Nagle off for lowest latency
+    video.set_nodelay(true).ok(); // Nagle off for lowest latency
+
+    let audio = if audio_on {
+        let a = accept(&listener, Duration::from_secs(5));
+        if let Some(s) = &a {
+            s.set_nodelay(true).ok();
+        }
+        a
+    } else {
+        None
+    };
 
     Ok((
         Session {
             _server: server_guard,
             _reverse: reverse_guard,
         },
-        stream,
+        video,
+        audio,
     ))
 }
 
