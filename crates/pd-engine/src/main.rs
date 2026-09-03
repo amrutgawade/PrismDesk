@@ -14,6 +14,7 @@ use pd_decode::Decoder;
 use pd_render::Mirror;
 
 mod control;
+mod record;
 mod transport;
 
 /// Live capture/quality configuration (the product's resolution/fps/quality
@@ -84,7 +85,7 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
     let mut mirror = Mirror::new(500, 1040, "PrismDesk — Live Mirror")?;
     println!("PrismDesk · live mirror (USB, adb reverse)");
     println!(
-        "  {} · max_size={} · {} Mbps · {} fps · mouse=touch · wheel=scroll · F11/M/S · close to stop",
+        "  {} · max_size={} · {} Mbps · {} fps · mouse=touch · F11 fs · M mute · S shot · R rec · close",
         cfg.codec, cfg.max_size, cfg.bitrate / 1_000_000, cfg.fps
     );
 
@@ -104,6 +105,7 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
 
     let mut backoff = Duration::from_millis(200);
     let cap = Duration::from_secs(5);
+    let mut recorder: Option<record::Recorder> = None; // persists across reconnects
 
     'session: loop {
         // Bring up a session; on failure (device unplugged/sleeping) retry with
@@ -178,6 +180,22 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
                     Err(e) => eprintln!("[shot] {e:?}"),
                 }
             }
+            if mirror.rec_toggled() {
+                if let Some(r) = recorder.take() {
+                    match r.finish() {
+                        Some((p, n)) => println!("[rec] saved {p} ({n} frames)"),
+                        None => eprintln!("[rec] nothing recorded"),
+                    }
+                } else {
+                    let (w, h) = mirror.video_size();
+                    if w > 0 && h > 0 {
+                        recorder = Some(record::Recorder::new(rec_path(), w as u16, h as u16));
+                        println!("[rec] recording... press R again to stop");
+                    } else {
+                        eprintln!("[rec] no video yet");
+                    }
+                }
+            }
             // Mouse -> device touch/scroll injection.
             if let Some(ctl) = &mut control {
                 for e in mirror.drain_input() {
@@ -213,6 +231,9 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
             loop {
                 match rx.try_recv() {
                     Ok(au) => {
+                        if let Some(r) = &mut recorder {
+                            r.feed(&au.data, au.pts_100ns / 10, au.is_key, au.is_config);
+                        }
                         if let Err(e) = dec.decode(&au.data, au.pts_100ns, &mut out) {
                             eprintln!("[decode] {e:?}");
                         }
@@ -247,6 +268,11 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
         backoff = (backoff * 2).min(cap);
     }
 
+    if let Some(r) = recorder.take() {
+        if let Some((p, n)) = r.finish() {
+            println!("[rec] saved {p} ({n} frames)");
+        }
+    }
     println!("[ok] live mirror closed");
     Ok(())
 }
@@ -329,6 +355,17 @@ fn blank_demo() -> windows_core::Result<()> {
         std::thread::sleep(Duration::from_millis(4));
     }
     Ok(())
+}
+
+fn rec_path() -> String {
+    let base = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
+    let dir = format!("{base}\\Videos\\PrismDesk");
+    let _ = std::fs::create_dir_all(&dir);
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("{dir}\\prismdesk-{ms}.mp4")
 }
 
 fn screenshot_path() -> String {
