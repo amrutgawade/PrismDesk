@@ -3,8 +3,9 @@
 //! (`pd-engine --mirror ...`) so the UI stays responsive and each mirror is
 //! isolated.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -19,6 +20,7 @@ const DIM: Color32 = Color32::from_rgb(0x8a, 0x93, 0xa2);
 const ACCENT: Color32 = Color32::from_rgb(0x8b, 0x5c, 0xf6);
 const CYAN: Color32 = Color32::from_rgb(0x34, 0xe0, 0xd4);
 const WARN: Color32 = Color32::from_rgb(0xd9, 0xa2, 0x1b);
+const STOP: Color32 = Color32::from_rgb(0xc0, 0x39, 0x2b);
 
 fn adb_path() -> PathBuf {
     let bundled = Path::new(r"C:\platform-tools\adb.exe");
@@ -106,6 +108,7 @@ struct Dashboard {
     preset: usize,
     audio: bool,
     status: String,
+    running: HashMap<String, Child>, // serial -> live mirror process
 }
 
 impl Dashboard {
@@ -116,6 +119,7 @@ impl Dashboard {
             preset: 0,
             audio: true,
             status: String::new(),
+            running: HashMap::new(),
         };
         d.refresh();
         d
@@ -123,6 +127,9 @@ impl Dashboard {
 
     fn refresh(&mut self) {
         self.devices = list_devices();
+        // Drop mirrors whose window the user closed (child exited).
+        self.running
+            .retain(|_, c| matches!(c.try_wait(), Ok(None)));
     }
 
     fn start_mirror(&mut self, serial: &str) {
@@ -137,8 +144,18 @@ impl Dashboard {
             cmd.arg("--no-audio");
         }
         match cmd.spawn() {
-            Ok(_) => self.status = format!("Started mirror · {serial}"),
+            Ok(child) => {
+                self.running.insert(serial.to_string(), child);
+                self.status = format!("Mirroring · {serial}");
+            }
             Err(e) => self.status = format!("Failed to start: {e}"),
+        }
+    }
+
+    fn stop_mirror(&mut self, serial: &str) {
+        if let Some(mut c) = self.running.remove(serial) {
+            let _ = c.kill();
+            self.status = format!("Stopped · {serial}");
         }
     }
 }
@@ -222,7 +239,19 @@ impl eframe::App for Dashboard {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if d.authorized {
+                                        if !d.authorized {
+                                            ui.label(RichText::new("unauthorized").color(WARN));
+                                        } else if self.running.contains_key(&d.serial) {
+                                            let btn = egui::Button::new(
+                                                RichText::new("Stop").color(Color32::WHITE).strong(),
+                                            )
+                                            .fill(STOP)
+                                            .rounding(Rounding::same(8.0))
+                                            .min_size(egui::vec2(112.0, 34.0));
+                                            if ui.add(btn).clicked() {
+                                                self.stop_mirror(&d.serial);
+                                            }
+                                        } else {
                                             let btn = egui::Button::new(
                                                 RichText::new("Start Mirror")
                                                     .color(Color32::WHITE)
@@ -234,8 +263,6 @@ impl eframe::App for Dashboard {
                                             if ui.add(btn).clicked() {
                                                 self.start_mirror(&d.serial);
                                             }
-                                        } else {
-                                            ui.label(RichText::new("unauthorized").color(WARN));
                                         }
                                     },
                                 );
