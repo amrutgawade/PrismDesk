@@ -57,13 +57,15 @@ fn scid() -> String {
 }
 
 /// Start a video session and return the connected socket + a session guard.
+#[allow(clippy::type_complexity)]
 pub fn start(
     max_size: u32,
     bitrate: u32,
     fps: u32,
     codec: &str,
     audio_on: bool,
-) -> Result<(Session, TcpStream, Option<TcpStream>), String> {
+    control_on: bool,
+) -> Result<(Session, TcpStream, Option<TcpStream>, Option<TcpStream>), String> {
     let jar = server_jar();
     if !jar.exists() {
         return Err(format!("pinned server jar not found at {}", jar.display()));
@@ -106,7 +108,7 @@ pub fn start(
         "tunnel_forward=false",
         &format!("audio={audio_on}"),
         "audio_codec=raw", // 48 kHz stereo s16le PCM, no decode needed
-        "control=false",
+        &format!("control={control_on}"),
         "cleanup=true",
         &format!("video_codec={codec}"),
         &format!("max_size={max_size}"),
@@ -140,6 +142,16 @@ pub fn start(
         None
     };
 
+    let control = if control_on {
+        let c = accept(&listener, Duration::from_secs(5));
+        if let Some(s) = &c {
+            s.set_nodelay(true).ok();
+        }
+        c
+    } else {
+        None
+    };
+
     Ok((
         Session {
             _server: server_guard,
@@ -147,6 +159,7 @@ pub fn start(
         },
         video,
         audio,
+        control,
     ))
 }
 

@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use pd_decode::Decoder;
 use pd_render::Mirror;
 
+mod control;
 mod transport;
 
 /// Live capture/quality configuration (the product's resolution/fps/quality
@@ -83,7 +84,7 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
     let mut mirror = Mirror::new(500, 1040, "PrismDesk — Live Mirror")?;
     println!("PrismDesk · live mirror (USB, adb reverse)");
     println!(
-        "  {} · max_size={} · {} Mbps · {} fps · F11 fullscreen · M mute · S screenshot · close to stop",
+        "  {} · max_size={} · {} Mbps · {} fps · mouse=touch · wheel=scroll · F11/M/S · close to stop",
         cfg.codec, cfg.max_size, cfg.bitrate / 1_000_000, cfg.fps
     );
 
@@ -107,13 +108,19 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
     'session: loop {
         // Bring up a session; on failure (device unplugged/sleeping) retry with
         // bounded backoff while the window stays responsive.
-        let (session, stream, audio_stream) =
-            match transport::start(cfg.max_size, cfg.bitrate, cfg.fps, &cfg.codec, want_audio) {
-                Ok(s) => {
-                    backoff = Duration::from_millis(200);
-                    println!("[transport] connected");
-                    s
-                }
+        let (session, stream, audio_stream, control_stream) = match transport::start(
+            cfg.max_size,
+            cfg.bitrate,
+            cfg.fps,
+            &cfg.codec,
+            want_audio,
+            true, // control (mouse) on
+        ) {
+            Ok(s) => {
+                backoff = Duration::from_millis(200);
+                println!("[transport] connected");
+                s
+            }
             Err(e) => {
                 eprintln!("[transport] {e} — retry in {:.1}s", backoff.as_secs_f32());
                 if pump_for(&mut mirror, backoff) {
@@ -150,6 +157,8 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
 
         let mut dec = Decoder::new(mirror.device())?;
         let mut out = Vec::new();
+        let mut control = control_stream;
+        let mut mouse_down = false;
 
         // Returns true if the user closed the window, false if the stream dropped.
         let user_quit = 'stream: loop {
@@ -167,6 +176,37 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
                     Ok(true) => println!("[shot] saved {path}"),
                     Ok(false) => eprintln!("[shot] no frame yet"),
                     Err(e) => eprintln!("[shot] {e:?}"),
+                }
+            }
+            // Mouse -> device touch/scroll injection.
+            if let Some(ctl) = &mut control {
+                for e in mirror.drain_input() {
+                    match e.kind {
+                        1 => {
+                            if let Some((x, y, w, h)) = mirror.map_client_to_video(e.x, e.y) {
+                                mouse_down = true;
+                                control::send(ctl, &control::touch(control::ACTION_DOWN, x, y, w, h, true));
+                            }
+                        }
+                        2 => {
+                            if let Some((x, y, w, h)) = mirror.map_client_to_video(e.x, e.y) {
+                                control::send(ctl, &control::touch(control::ACTION_UP, x, y, w, h, false));
+                            }
+                            mouse_down = false;
+                        }
+                        0 if mouse_down => {
+                            if let Some((x, y, w, h)) = mirror.map_client_to_video(e.x, e.y) {
+                                control::send(ctl, &control::touch(control::ACTION_MOVE, x, y, w, h, true));
+                            }
+                        }
+                        3 => {
+                            if let Some((x, y, w, h)) = mirror.map_client_to_video(e.x, e.y) {
+                                let v = if e.wheel > 0 { 1.0 } else { -1.0 };
+                                control::send(ctl, &control::scroll(x, y, w, h, v));
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
             let mut latest = None;

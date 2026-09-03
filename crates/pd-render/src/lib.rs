@@ -24,6 +24,7 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::System::Threading::WaitForSingleObjectEx;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
@@ -37,8 +38,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, GetWindowRect, LoadCursorW, PeekMessageW, PostQuitMessage, RegisterClassExW,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
     CW_USEDEFAULT, GWL_STYLE, HWND_TOP, IDC_ARROW, MSG, PM_REMOVE, SWP_FRAMECHANGED,
-    SWP_NOOWNERZORDER, SW_SHOW, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_QUIT,
-    WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+    SWP_NOOWNERZORDER, SW_SHOW, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_POPUP,
+    WS_VISIBLE,
 };
 
 const VK_F11: usize = 0x7A;
@@ -51,6 +53,19 @@ static TOGGLE_FS: AtomicBool = AtomicBool::new(false);
 static TOGGLE_MUTE: AtomicBool = AtomicBool::new(false);
 /// Set by the window proc on S; consumed by the engine to take a screenshot.
 static TOGGLE_SHOT: AtomicBool = AtomicBool::new(false);
+
+/// A raw mouse event in window client pixels. kind: 0=move 1=down 2=up 3=wheel.
+#[derive(Clone, Copy)]
+pub struct MouseEvent {
+    pub kind: u8,
+    pub x: i32,
+    pub y: i32,
+    pub wheel: i32,
+}
+/// Mouse events queued by the window proc, drained by the engine each frame.
+static INPUT: Mutex<Vec<MouseEvent>> = Mutex::new(Vec::new());
+/// Last mouse client position (for wheel events, whose coords are screen-space).
+static LAST_MOUSE: Mutex<(i32, i32)> = Mutex::new((0, 0));
 
 mod video;
 use video::Video;
@@ -70,6 +85,7 @@ pub struct Mirror {
     video: Option<Video>,
     fullscreen: bool,
     saved: Option<(isize, RECT)>,
+    vid_size: (u32, u32),
 }
 
 impl Mirror {
@@ -103,6 +119,7 @@ impl Mirror {
             video: None,
             fullscreen: false,
             saved: None,
+            vid_size: (0, 0),
         };
         unsafe { me.create_rtv()? };
         unsafe { ShowWindow(hwnd, SW_SHOW).ok().ok() };
@@ -125,6 +142,35 @@ impl Mirror {
     /// True once if the user pressed S since the last check (screenshot).
     pub fn shot_requested(&self) -> bool {
         TOGGLE_SHOT.swap(false, Ordering::Relaxed)
+    }
+
+    /// Drain queued mouse events (raw window client coordinates).
+    pub fn drain_input(&self) -> Vec<MouseEvent> {
+        INPUT.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
+    }
+
+    /// Map a window client point to device coordinates within the video content
+    /// (accounts for letterbox). Returns (x, y, frame_w, frame_h) or None if the
+    /// point is outside the video area.
+    pub fn map_client_to_video(&self, mx: i32, my: i32) -> Option<(u32, u32, u32, u32)> {
+        let (vw, vh) = self.vid_size;
+        if vw == 0 || vh == 0 {
+            return None;
+        }
+        let (ww, wh) = (self.size.0 as f32, self.size.1 as f32);
+        let (vwf, vhf) = (vw as f32, vh as f32);
+        let scale = (ww / vwf).min(wh / vhf);
+        let (dw, dh) = (vwf * scale, vhf * scale);
+        let ox = (ww - dw) * 0.5;
+        let oy = (wh - dh) * 0.5;
+        let cx = mx as f32 - ox;
+        let cy = my as f32 - oy;
+        if cx < 0.0 || cy < 0.0 || cx >= dw || cy >= dh {
+            return None;
+        }
+        let vx = (cx / scale).clamp(0.0, vwf - 1.0) as u32;
+        let vy = (cy / scale).clamp(0.0, vhf - 1.0) as u32;
+        Some((vx, vy, vw, vh))
     }
 
     /// Save the current frame at native video resolution to a PNG. Returns false
@@ -240,6 +286,7 @@ impl Mirror {
         vw: u32,
         vh: u32,
     ) -> Result<()> {
+        self.vid_size = (vw, vh);
         unsafe {
             WaitForSingleObjectEx(self.waitable, 1000, BOOL(0));
             self.maybe_resize()?;
@@ -324,6 +371,27 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     TOGGLE_SHOT.store(true, Ordering::Relaxed);
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP => {
+                let x = (lparam.0 & 0xffff) as i16 as i32;
+                let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
+                if let Ok(mut p) = LAST_MOUSE.lock() {
+                    *p = (x, y);
+                }
+                let kind = match msg {
+                    WM_LBUTTONDOWN => 1,
+                    WM_LBUTTONUP => 2,
+                    _ => 0,
+                };
+                push_input(MouseEvent { kind, x, y, wheel: 0 });
+                LRESULT(0)
+            }
+            WM_MOUSEWHEEL => {
+                // Wheel coords are screen-space; reuse the last client position.
+                let (x, y) = LAST_MOUSE.lock().map(|p| *p).unwrap_or((0, 0));
+                let delta = ((wparam.0 >> 16) & 0xffff) as i16 as i32;
+                push_input(MouseEvent { kind: 3, x, y, wheel: delta });
+                LRESULT(0)
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
@@ -428,6 +496,14 @@ unsafe fn create_swapchain(
 fn wchars_to_string(w: &[u16]) -> String {
     let end = w.iter().position(|&c| c == 0).unwrap_or(w.len());
     String::from_utf16_lossy(&w[..end])
+}
+
+fn push_input(e: MouseEvent) {
+    if let Ok(mut q) = INPUT.lock() {
+        if q.len() < 4096 {
+            q.push(e);
+        }
+    }
 }
 
 fn write_png_bgra(path: &str, w: u32, h: u32, bgra: &[u8]) -> std::io::Result<()> {
