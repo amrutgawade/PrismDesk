@@ -17,3 +17,4 @@ pd-audio = { path = "../pd-audio" }
 windows-core.workspace = true
 mp4 = "0.14"
 bytes = "1"
+clipboard-win = "5"

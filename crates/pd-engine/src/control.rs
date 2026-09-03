@@ -1,11 +1,12 @@
 //! scrcpy control-socket message encoding (client -> device), big-endian.
 //! v1: mouse as touch injection + wheel as scroll. Keyboard/UHID come later.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::TcpStream;
 
 const TYPE_INJECT_TOUCH: u8 = 2;
 const TYPE_INJECT_SCROLL: u8 = 3;
+const TYPE_SET_CLIPBOARD: u8 = 9;
 const POINTER_MOUSE: u64 = 0xFFFF_FFFF_FFFF_FFFF; // scrcpy POINTER_ID_MOUSE
 const BUTTON_PRIMARY: u32 = 1; // AMOTION_EVENT_BUTTON_PRIMARY
 
@@ -53,8 +54,55 @@ pub fn scroll(x: u32, y: u32, w: u32, h: u32, vscroll: f32) -> Vec<u8> {
     b
 }
 
+/// SET_CLIPBOARD: set the device clipboard to `text`; `paste` also injects a
+/// paste into the focused field. sequence=0 (no ack requested).
+pub fn set_clipboard(text: &str, paste: bool) -> Vec<u8> {
+    let t = text.as_bytes();
+    let mut b = Vec::with_capacity(14 + t.len());
+    b.push(TYPE_SET_CLIPBOARD);
+    b.extend_from_slice(&0u64.to_be_bytes()); // sequence
+    b.push(u8::from(paste));
+    b.extend_from_slice(&(t.len() as u32).to_be_bytes());
+    b.extend_from_slice(t);
+    b
+}
+
 pub fn send(stream: &mut TcpStream, msg: &[u8]) {
     if let Err(e) = stream.write_all(msg) {
         eprintln!("[control] send err: {e}");
+    }
+}
+
+/// Read one device->client message. Returns Some(text) for a CLIPBOARD message
+/// (device clipboard changed), None for others (ack / uhid output).
+pub fn read_device_msg(stream: &mut impl Read) -> std::io::Result<Option<String>> {
+    let mut t = [0u8; 1];
+    stream.read_exact(&mut t)?;
+    match t[0] {
+        0 => {
+            // CLIPBOARD: u32 length + UTF-8 text
+            let mut l = [0u8; 4];
+            stream.read_exact(&mut l)?;
+            let n = u32::from_be_bytes(l) as usize;
+            let mut buf = vec![0u8; n];
+            stream.read_exact(&mut buf)?;
+            Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
+        }
+        1 => {
+            // ACK_CLIPBOARD: u64 sequence
+            let mut s = [0u8; 8];
+            stream.read_exact(&mut s)?;
+            Ok(None)
+        }
+        2 => {
+            // UHID_OUTPUT: u16 id + u16 size + data
+            let mut h = [0u8; 4];
+            stream.read_exact(&mut h)?;
+            let size = u16::from_be_bytes([h[2], h[3]]) as usize;
+            let mut d = vec![0u8; size];
+            stream.read_exact(&mut d)?;
+            Ok(None)
+        }
+        _ => Ok(None),
     }
 }

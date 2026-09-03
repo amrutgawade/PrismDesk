@@ -47,6 +47,7 @@ const VK_F11: usize = 0x7A;
 const VK_M: usize = 0x4D;
 const VK_S: usize = 0x53;
 const VK_R: usize = 0x52;
+const VK_V: usize = 0x56;
 
 /// Set by the window proc on F11; consumed by `pump` to toggle fullscreen.
 static TOGGLE_FS: AtomicBool = AtomicBool::new(false);
@@ -56,6 +57,8 @@ static TOGGLE_MUTE: AtomicBool = AtomicBool::new(false);
 static TOGGLE_SHOT: AtomicBool = AtomicBool::new(false);
 /// Set by the window proc on R; consumed by the engine to toggle recording.
 static TOGGLE_REC: AtomicBool = AtomicBool::new(false);
+/// Set by the window proc on V; consumed by the engine to paste PC clipboard.
+static TOGGLE_PASTE: AtomicBool = AtomicBool::new(false);
 
 /// A raw mouse event in window client pixels. kind: 0=move 1=down 2=up 3=wheel.
 #[derive(Clone, Copy)]
@@ -150,6 +153,11 @@ impl Mirror {
     /// True once if the user pressed R since the last check (toggle recording).
     pub fn rec_toggled(&self) -> bool {
         TOGGLE_REC.swap(false, Ordering::Relaxed)
+    }
+
+    /// True once if the user pressed V since the last check (paste PC clipboard).
+    pub fn paste_requested(&self) -> bool {
+        TOGGLE_PASTE.swap(false, Ordering::Relaxed)
     }
 
     /// Drain queued mouse events (raw window client coordinates).
@@ -384,6 +392,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     TOGGLE_SHOT.store(true, Ordering::Relaxed);
                 } else if wparam.0 == VK_R {
                     TOGGLE_REC.store(true, Ordering::Relaxed);
+                } else if wparam.0 == VK_V {
+                    TOGGLE_PASTE.store(true, Ordering::Relaxed);
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }

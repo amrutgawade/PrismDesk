@@ -85,7 +85,7 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
     let mut mirror = Mirror::new(500, 1040, "PrismDesk — Live Mirror")?;
     println!("PrismDesk · live mirror (USB, adb reverse)");
     println!(
-        "  {} · max_size={} · {} Mbps · {} fps · mouse=touch · F11 fs · M mute · S shot · R rec · close",
+        "  {} · {} · {}Mbps · {}fps · mouse · F11 fs · M mute · S shot · R rec · V paste · close",
         cfg.codec, cfg.max_size, cfg.bitrate / 1_000_000, cfg.fps
     );
 
@@ -161,6 +161,23 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
         let mut out = Vec::new();
         let mut control = control_stream;
         let mut mouse_down = false;
+        // Clipboard: device -> PC arrives on the control socket (read on a clone).
+        let clip_in: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let clip_reader = control.as_ref().and_then(|c| c.try_clone().ok()).map(|mut rc| {
+            let ci = clip_in.clone();
+            std::thread::spawn(move || loop {
+                match control::read_device_msg(&mut rc) {
+                    Ok(Some(t)) => {
+                        if let Ok(mut g) = ci.lock() {
+                            *g = Some(t);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(_) => break,
+                }
+            })
+        });
 
         // Returns true if the user closed the window, false if the stream dropped.
         let user_quit = 'stream: loop {
@@ -194,6 +211,21 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
                     } else {
                         eprintln!("[rec] no video yet");
                     }
+                }
+            }
+            // Clipboard PC -> device (V), and device -> PC (auto).
+            if mirror.paste_requested() {
+                if let Some(ctl) = &mut control {
+                    if let Ok(t) = clipboard_win::get_clipboard_string() {
+                        control::send(ctl, &control::set_clipboard(&t, true));
+                        println!("[clip] PC -> device ({} chars, pasted)", t.len());
+                    }
+                }
+            }
+            if let Ok(mut g) = clip_in.lock() {
+                if let Some(t) = g.take() {
+                    let _ = clipboard_win::set_clipboard_string(&t);
+                    println!("[clip] device -> PC ({} chars)", t.len());
                 }
             }
             // Mouse -> device touch/scroll injection.
@@ -255,6 +287,9 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
         drop(session); // kill the server + remove the reverse tunnel
         let _ = net.join();
         if let Some(h) = audio_net {
+            let _ = h.join();
+        }
+        if let Some(h) = clip_reader {
             let _ = h.join();
         }
 
