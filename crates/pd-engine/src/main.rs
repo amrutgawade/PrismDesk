@@ -79,83 +79,108 @@ fn flag_value(args: &[String], name: &str) -> Option<String> {
 fn live_mirror(cfg: Config) -> windows_core::Result<()> {
     use std::sync::mpsc;
 
-    let (session, stream) = match transport::start(cfg.max_size, cfg.bitrate, cfg.fps, &cfg.codec) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("[transport] {e}");
-            std::process::exit(1);
-        }
-    };
+    // Window persists across reconnects; only the session + decoder recycle.
+    let mut mirror = Mirror::new(500, 1040, "PrismDesk — Live Mirror")?;
     println!("PrismDesk · live mirror (USB, adb reverse)");
     println!(
-        "  {} · max_size={} · {} Mbps · {} fps",
+        "  {} · max_size={} · {} Mbps · {} fps · F11 fullscreen · close window to stop",
         cfg.codec, cfg.max_size, cfg.bitrate / 1_000_000, cfg.fps
     );
 
-    let (tx, rx) = mpsc::channel::<transport::Au>();
-    let mut netstream = stream;
-    let net = std::thread::spawn(move || loop {
-        match transport::read_frame(&mut netstream) {
-            Ok(au) => {
-                if tx.send(au).is_err() {
-                    break;
-                }
+    let mut backoff = Duration::from_millis(200);
+    let cap = Duration::from_secs(5);
+
+    'session: loop {
+        // Bring up a session; on failure (device unplugged/sleeping) retry with
+        // bounded backoff while the window stays responsive.
+        let (session, stream) = match transport::start(cfg.max_size, cfg.bitrate, cfg.fps, &cfg.codec)
+        {
+            Ok(s) => {
+                backoff = Duration::from_millis(200);
+                println!("[transport] connected");
+                s
             }
-            Err(_) => break, // EOF / disconnect
-        }
-    });
+            Err(e) => {
+                eprintln!("[transport] {e} — retry in {:.1}s", backoff.as_secs_f32());
+                if pump_for(&mut mirror, backoff) {
+                    break 'session;
+                }
+                backoff = (backoff * 2).min(cap);
+                continue;
+            }
+        };
 
-    // Open large (~1040 tall) to use most of a 1080p panel; letterbox handles aspect.
-    let mut mirror = Mirror::new(500, 1040, "PrismDesk — Live Mirror")?;
-    let mut dec = Decoder::new(mirror.device())?;
-    println!("  decoding on {} · F11 = fullscreen · close the window to stop", mirror.adapter_name());
-
-    let mut out = Vec::new();
-    let mut frames = 0u64;
-    let start = Instant::now();
-
-    loop {
-        if mirror.pump() {
-            break;
-        }
-        // Drain all queued access units: decode every one (keeps the decoder in
-        // sync) but keep only the newest decoded frame to present.
-        let mut latest = None;
-        let mut disconnected = false;
-        loop {
-            match rx.try_recv() {
+        let (tx, rx) = mpsc::channel::<transport::Au>();
+        let mut netstream = stream;
+        let net = std::thread::spawn(move || loop {
+            match transport::read_frame(&mut netstream) {
                 Ok(au) => {
-                    if let Err(e) = dec.decode(&au.data, au.pts_100ns, &mut out) {
-                        eprintln!("[decode] {e:?}");
-                    }
-                    for f in out.drain(..) {
-                        latest = Some(f); // older frames drop -> back to the pool
+                    if tx.send(au).is_err() {
+                        break;
                     }
                 }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    disconnected = true;
-                    break;
+                Err(_) => break, // EOF / disconnect
+            }
+        });
+
+        let mut dec = Decoder::new(mirror.device())?;
+        let mut out = Vec::new();
+
+        // Returns true if the user closed the window, false if the stream dropped.
+        let user_quit = 'stream: loop {
+            if mirror.pump() {
+                break 'stream true;
+            }
+            let mut latest = None;
+            loop {
+                match rx.try_recv() {
+                    Ok(au) => {
+                        if let Err(e) = dec.decode(&au.data, au.pts_100ns, &mut out) {
+                            eprintln!("[decode] {e:?}");
+                        }
+                        for f in out.drain(..) {
+                            latest = Some(f); // older frames drop -> back to the pool
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => break 'stream false,
                 }
             }
+            if let Some(f) = latest.take() {
+                mirror.render_frame(&f.texture, f.subresource, f.width, f.height)?;
+            } else {
+                std::thread::sleep(Duration::from_millis(1)); // idle
+            }
+        };
+
+        drop(session); // kill the server + remove the reverse tunnel
+        let _ = net.join();
+
+        if user_quit {
+            break 'session;
         }
-        if let Some(f) = latest.take() {
-            mirror.render_frame(&f.texture, f.subresource, f.width, f.height)?;
-            frames += 1;
-        } else {
-            std::thread::sleep(Duration::from_millis(1)); // idle, avoid busy-spin
+        println!("[transport] stream ended — reconnecting");
+        if pump_for(&mut mirror, backoff) {
+            break 'session;
         }
-        if disconnected {
-            println!("[transport] stream ended");
-            break;
-        }
+        backoff = (backoff * 2).min(cap);
     }
 
-    drop(session); // kill the server + remove the reverse tunnel
-    let _ = net.join();
-    let secs = start.elapsed().as_secs_f32().max(0.001);
-    println!("[ok] live mirror: {frames} frames in {secs:.1}s ({:.0} fps)", frames as f32 / secs);
+    println!("[ok] live mirror closed");
     Ok(())
+}
+
+/// Pump window messages for `dur` so the window stays responsive/closable while
+/// idle (e.g. during a reconnect backoff). Returns true if the window closed.
+fn pump_for(mirror: &mut Mirror, dur: Duration) -> bool {
+    let end = Instant::now() + dur;
+    while Instant::now() < end {
+        if mirror.pump() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    false
 }
 
 fn play_capture() -> windows_core::Result<()> {
