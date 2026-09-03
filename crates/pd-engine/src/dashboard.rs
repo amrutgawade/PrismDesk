@@ -2,6 +2,10 @@
 //! their quality settings, and launches the native mirror as a child process
 //! (`pd-engine --mirror ...`) so the UI stays responsive and each mirror is
 //! isolated.
+//!
+//! Phase A design foundation: Geist typography, Lucide icon font, a dark/light
+//! token palette with a persisted toggle. Bundled fonts live in `assets/fonts/`
+//! (Geist — OFL-1.1; Lucide — ISC).
 
 use std::collections::HashMap;
 use std::net::TcpListener;
@@ -12,18 +16,196 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use egui::{Color32, RichText, Rounding};
+use egui::{Color32, FontFamily, FontId, RichText, Rounding, Stroke};
 
-// Dark graphite + a restrained "prism" accent (violet CTA, cyan highlight).
-const BG: Color32 = Color32::from_rgb(0x0e, 0x10, 0x14);
-const SURFACE: Color32 = Color32::from_rgb(0x17, 0x1a, 0x20);
-const SURFACE2: Color32 = Color32::from_rgb(0x20, 0x25, 0x2e);
-const TEXT: Color32 = Color32::from_rgb(0xe8, 0xeb, 0xf0);
-const DIM: Color32 = Color32::from_rgb(0x8a, 0x93, 0xa2);
-const ACCENT: Color32 = Color32::from_rgb(0x8b, 0x5c, 0xf6);
-const CYAN: Color32 = Color32::from_rgb(0x34, 0xe0, 0xd4);
-const WARN: Color32 = Color32::from_rgb(0xd9, 0xa2, 0x1b);
-const STOP: Color32 = Color32::from_rgb(0xc0, 0x39, 0x2b);
+// ============================ design tokens ============================
+
+/// A full color set for one theme. Two instances (dark default + light) drive
+/// every surface, so the toggle is a real re-theme, not just an egui flip.
+#[derive(Clone, Copy)]
+struct Palette {
+    dark: bool,
+    bg: Color32,
+    surface: Color32,
+    surface2: Color32,
+    elevated: Color32,
+    border: Color32,
+    text: Color32,
+    text2: Color32,
+    dim: Color32,
+    accent: Color32,
+    accent_weak: Color32,
+    cyan: Color32,
+    cyan_weak: Color32,
+    live: Color32,
+    live_weak: Color32,
+    warn: Color32,
+    on_accent: Color32,
+    extreme: Color32,
+}
+
+impl Palette {
+    fn new(dark: bool) -> Self {
+        if dark {
+            Self::dark()
+        } else {
+            Self::light()
+        }
+    }
+
+    fn dark() -> Self {
+        Self {
+            dark: true,
+            bg: rgb(0x0e, 0x10, 0x14),
+            surface: rgb(0x17, 0x1a, 0x20),
+            surface2: rgb(0x20, 0x25, 0x2e),
+            elevated: rgb(0x26, 0x2b, 0x35),
+            border: Color32::from_white_alpha(20),
+            text: rgb(0xe8, 0xeb, 0xf0),
+            text2: rgb(0xa2, 0xa8, 0xb3),
+            dim: rgb(0x82, 0x8a, 0x98),
+            accent: rgb(0x8b, 0x5c, 0xf6),
+            accent_weak: rgb(0x24, 0x1d, 0x3a),
+            cyan: rgb(0x34, 0xe0, 0xd4),
+            cyan_weak: rgb(0x12, 0x33, 0x33),
+            live: rgb(0xef, 0x44, 0x44),
+            live_weak: rgb(0x35, 0x1c, 0x1c),
+            warn: rgb(0xd9, 0xa2, 0x1b),
+            on_accent: rgb(0xff, 0xff, 0xff),
+            extreme: rgb(0x0a, 0x0c, 0x0f),
+        }
+    }
+
+    fn light() -> Self {
+        Self {
+            dark: false,
+            bg: rgb(0xf4, 0xf5, 0xf7),
+            surface: rgb(0xff, 0xff, 0xff),
+            surface2: rgb(0xf0, 0xf1, 0xf4),
+            elevated: rgb(0xff, 0xff, 0xff),
+            border: Color32::from_black_alpha(23),
+            text: rgb(0x16, 0x18, 0x1d),
+            text2: rgb(0x4a, 0x50, 0x5c),
+            dim: rgb(0x86, 0x8c, 0x98),
+            accent: rgb(0x7c, 0x3a, 0xed),
+            accent_weak: rgb(0xf1, 0xec, 0xfe),
+            cyan: rgb(0x0e, 0xa5, 0xa2),
+            cyan_weak: rgb(0xdc, 0xf4, 0xf2),
+            live: rgb(0xdc, 0x26, 0x26),
+            live_weak: rgb(0xfd, 0xec, 0xec),
+            warn: rgb(0xb4, 0x53, 0x09),
+            on_accent: rgb(0xff, 0xff, 0xff),
+            extreme: rgb(0xff, 0xff, 0xff),
+        }
+    }
+}
+
+const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
+    Color32::from_rgb(r, g, b)
+}
+
+fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t) as u8;
+    Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
+}
+
+// ============================ icons (Lucide) ============================
+
+/// Lucide glyph codepoints (verified against lucide-static font/lucide.css).
+mod ic {
+    pub const CAMERA: char = '\u{e064}';
+    pub const CIRCLE: char = '\u{e076}';
+    pub const SQUARE: char = '\u{e167}';
+    pub const VOLUME: char = '\u{e1ab}';
+    pub const VOLUME_X: char = '\u{e1ac}';
+    pub const PLAY: char = '\u{e13c}';
+    pub const POWER: char = '\u{e140}';
+    pub const MONITOR: char = '\u{e11d}';
+    pub const REFRESH: char = '\u{e145}';
+    pub const SUN: char = '\u{e178}';
+    pub const MOON: char = '\u{e11e}';
+    pub const KEYBOARD: char = '\u{e284}';
+    pub const INFO: char = '\u{e0f9}';
+    pub const SLIDERS: char = '\u{e29a}';
+}
+
+/// The named egui font family that resolves to lucide.ttf.
+fn icon_family() -> FontFamily {
+    FontFamily::Name("icons".into())
+}
+
+fn med_family() -> FontFamily {
+    FontFamily::Name("Geist Medium".into())
+}
+
+fn sb_family() -> FontFamily {
+    FontFamily::Name("Geist SemiBold".into())
+}
+
+/// A single icon glyph as sized, colored text.
+fn icon_rt(ch: char, size: f32, color: Color32) -> RichText {
+    RichText::new(ch.to_string())
+        .font(FontId::new(size, icon_family()))
+        .color(color)
+}
+
+/// Geist SemiBold text (real weight, not egui's faux-strong).
+fn sb(text: &str, size: f32, color: Color32) -> RichText {
+    RichText::new(text)
+        .font(FontId::new(size, sb_family()))
+        .color(color)
+}
+
+/// An icon glyph + label as one widget (a LayoutJob mixing the icon and text
+/// families), for buttons and tabs.
+fn icon_label(ch: char, label: &str, icon_col: Color32, text_col: Color32) -> egui::text::LayoutJob {
+    use egui::text::{LayoutJob, TextFormat};
+    let mut job = LayoutJob::default();
+    job.append(
+        &ch.to_string(),
+        0.0,
+        TextFormat {
+            font_id: FontId::new(15.0, icon_family()),
+            color: icon_col,
+            valign: egui::Align::Center,
+            ..Default::default()
+        },
+    );
+    job.append(
+        &format!("  {label}"),
+        0.0,
+        TextFormat {
+            font_id: FontId::new(13.5, med_family()),
+            color: text_col,
+            valign: egui::Align::Center,
+            ..Default::default()
+        },
+    );
+    job
+}
+
+/// A 32px square icon-only button with a tooltip (header actions).
+fn icon_button(ui: &mut egui::Ui, pal: &Palette, ch: char, tip: &str) -> egui::Response {
+    let btn = egui::Button::new(icon_rt(ch, 15.0, pal.text2))
+        .fill(pal.surface2)
+        .stroke(Stroke::new(1.0, pal.border))
+        .rounding(Rounding::same(8.0))
+        .min_size(egui::vec2(32.0, 30.0));
+    ui.add(btn).on_hover_text(tip)
+}
+
+/// A rounded pill (badge / chip).
+fn pill(ui: &mut egui::Ui, text: RichText, bg: Color32) {
+    egui::Frame::default()
+        .fill(bg)
+        .rounding(Rounding::same(999.0))
+        .inner_margin(egui::Margin::symmetric(7.0, 2.0))
+        .show(ui, |ui| {
+            ui.label(text);
+        });
+}
+
+// ============================ adb / devices ============================
 
 fn adb_path() -> PathBuf {
     let bundled = Path::new(r"C:\platform-tools\adb.exe");
@@ -42,35 +224,182 @@ struct Device {
 }
 
 const PRESETS: [&str; 3] = ["balanced", "crisp", "lowlatency"];
+const PRESET_LABELS: [&str; 3] = ["Balanced", "Crisp", "Low-latency"];
+
+// ============================ persisted config ============================
+
+/// Tiny config persisted to %APPDATA%\PrismDesk\config.txt as `key=value` lines
+/// (serde-free). Missing/corrupt file → defaults; unknown keys are ignored.
+struct AppConfig {
+    dark: bool,
+    settings: HashMap<String, DevSettings>,
+}
+
+fn config_path() -> PathBuf {
+    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
+    Path::new(&base).join("PrismDesk").join("config.txt")
+}
+
+impl AppConfig {
+    fn load() -> Self {
+        let mut cfg = AppConfig { dark: true, settings: HashMap::new() };
+        let text = match std::fs::read_to_string(config_path()) {
+            Ok(t) => t,
+            Err(_) => return cfg,
+        };
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((key, val)) = line.split_once('=') else { continue };
+            let (key, val) = (key.trim(), val.trim());
+            if key == "theme" {
+                cfg.dark = !val.eq_ignore_ascii_case("light");
+            } else if let Some(s) = key.strip_prefix("preset.") {
+                if let Ok(idx) = val.parse::<usize>() {
+                    cfg.settings.entry(s.to_string()).or_default().preset = idx.min(PRESETS.len() - 1);
+                }
+            } else if let Some(s) = key.strip_prefix("audio.") {
+                cfg.settings.entry(s.to_string()).or_default().audio = val.eq_ignore_ascii_case("true");
+            } else if let Some(s) = key.strip_prefix("input.") {
+                cfg.settings.entry(s.to_string()).or_default().input = val.eq_ignore_ascii_case("true");
+            }
+        }
+        cfg
+    }
+}
+
+/// Persist theme + per-device settings. Best-effort and never panics: an atomic
+/// temp-file + rename keeps a crash from leaving a half-written config.
+fn save_config(dark: bool, settings: &HashMap<String, DevSettings>) {
+    let path = config_path();
+    let Some(dir) = path.parent() else { return };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let mut out = String::with_capacity(64 + settings.len() * 48);
+    out.push_str("# PrismDesk config (managed by the app)\n");
+    out.push_str(if dark { "theme=dark\n" } else { "theme=light\n" });
+    let mut serials: Vec<&String> = settings.keys().collect();
+    serials.sort();
+    for s in serials {
+        if s.is_empty() || s.contains('=') || s.contains('\n') || s.contains('\r') {
+            continue;
+        }
+        let d = &settings[s];
+        out.push_str(&format!("preset.{s}={}\n", d.preset));
+        out.push_str(&format!("audio.{s}={}\n", d.audio));
+        out.push_str(&format!("input.{s}={}\n", d.input));
+    }
+    let tmp = dir.join("config.txt.tmp");
+    if std::fs::write(&tmp, out.as_bytes()).is_err() {
+        return;
+    }
+    let _ = std::fs::rename(&tmp, &path);
+}
+
+// ============================ app setup ============================
 
 pub fn run() -> eframe::Result<()> {
+    let cfg = AppConfig::load();
+    let dark = cfg.dark;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([440.0, 560.0])
-            .with_min_inner_size([380.0, 460.0])
+            .with_inner_size([460.0, 600.0])
+            .with_min_inner_size([380.0, 480.0])
             .with_title("PrismDesk"),
         ..Default::default()
     };
     eframe::run_native(
         "PrismDesk",
         options,
-        Box::new(|cc| {
-            setup_style(&cc.egui_ctx);
-            Ok(Box::new(Dashboard::new()))
+        Box::new(move |cc| {
+            setup_fonts(&cc.egui_ctx);
+            setup_style(&cc.egui_ctx, &Palette::new(dark));
+            Ok(Box::new(Dashboard::new(cfg)))
         }),
     )
 }
 
-fn setup_style(ctx: &egui::Context) {
-    use egui::{FontId, Stroke, Visuals};
-    let mut v = Visuals::dark();
-    v.panel_fill = BG;
-    v.window_fill = BG;
-    v.extreme_bg_color = Color32::from_rgb(0x0a, 0x0c, 0x0f);
-    v.override_text_color = Some(TEXT);
-    v.selection.bg_fill = ACCENT.linear_multiply(0.45);
-    v.selection.stroke = Stroke::new(1.0, ACCENT);
-    v.hyperlink_color = CYAN;
+/// Register Geist (proportional + weights + mono) and the Lucide icon font.
+fn setup_fonts(ctx: &egui::Context) {
+    use egui::{FontData, FontDefinitions};
+    let mut fonts = FontDefinitions::default();
+
+    fonts.font_data.insert(
+        "Geist".to_owned(),
+        FontData::from_static(include_bytes!("../assets/fonts/Geist-Regular.ttf")),
+    );
+    fonts.font_data.insert(
+        "Geist Medium".to_owned(),
+        FontData::from_static(include_bytes!("../assets/fonts/Geist-Medium.ttf")),
+    );
+    fonts.font_data.insert(
+        "Geist SemiBold".to_owned(),
+        FontData::from_static(include_bytes!("../assets/fonts/Geist-SemiBold.ttf")),
+    );
+    fonts.font_data.insert(
+        "Geist Bold".to_owned(),
+        FontData::from_static(include_bytes!("../assets/fonts/Geist-Bold.ttf")),
+    );
+    fonts.font_data.insert(
+        "Geist Mono".to_owned(),
+        FontData::from_static(include_bytes!("../assets/fonts/GeistMono-Regular.ttf")),
+    );
+    fonts.font_data.insert(
+        "icons".to_owned(),
+        FontData::from_static(include_bytes!("../assets/fonts/lucide.ttf")),
+    );
+
+    // Defaults (keep egui's built-ins as fallback for missing glyphs).
+    fonts
+        .families
+        .entry(FontFamily::Proportional)
+        .or_default()
+        .insert(0, "Geist".to_owned());
+    fonts
+        .families
+        .entry(FontFamily::Monospace)
+        .or_default()
+        .insert(0, "Geist Mono".to_owned());
+
+    // Named families for explicit weights and the icon glyphs.
+    fonts
+        .families
+        .insert(FontFamily::Name("Geist Medium".into()), vec!["Geist Medium".to_owned()]);
+    fonts
+        .families
+        .insert(FontFamily::Name("Geist SemiBold".into()), vec!["Geist SemiBold".to_owned()]);
+    fonts
+        .families
+        .insert(FontFamily::Name("Geist Bold".into()), vec!["Geist Bold".to_owned()]);
+    fonts
+        .families
+        .insert(FontFamily::Name("icons".into()), vec!["icons".to_owned()]);
+
+    ctx.set_fonts(fonts);
+}
+
+/// Apply the palette to egui visuals + set the Geist text scale. Called at
+/// startup and again whenever the theme toggles.
+fn setup_style(ctx: &egui::Context, pal: &Palette) {
+    use egui::Visuals;
+    let mut v = if pal.dark { Visuals::dark() } else { Visuals::light() };
+    v.panel_fill = pal.bg;
+    v.window_fill = pal.surface;
+    v.extreme_bg_color = pal.extreme;
+    v.override_text_color = Some(pal.text);
+    v.selection.bg_fill = pal.accent.linear_multiply(0.35);
+    v.selection.stroke = Stroke::new(1.0, pal.accent);
+    v.hyperlink_color = pal.cyan;
+    v.widgets.noninteractive.bg_fill = pal.surface;
+    v.widgets.inactive.bg_fill = pal.surface2;
+    v.widgets.inactive.weak_bg_fill = pal.surface2;
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0, pal.text2);
+    v.widgets.hovered.bg_fill = pal.elevated;
+    v.widgets.hovered.fg_stroke = Stroke::new(1.0, pal.text);
+    v.widgets.active.bg_fill = pal.accent;
     let r = Rounding::same(8.0);
     for w in [
         &mut v.widgets.noninteractive,
@@ -81,30 +410,25 @@ fn setup_style(ctx: &egui::Context) {
     ] {
         w.rounding = r;
     }
-    v.widgets.noninteractive.bg_fill = SURFACE;
-    v.widgets.inactive.bg_fill = SURFACE2;
-    v.widgets.inactive.weak_bg_fill = SURFACE2;
-    v.widgets.hovered.bg_fill = SURFACE2;
-    v.widgets.active.bg_fill = ACCENT;
-    v.window_rounding = Rounding::same(10.0);
+    v.window_rounding = Rounding::same(12.0);
     ctx.set_visuals(v);
 
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-    style.spacing.button_padding = egui::vec2(12.0, 8.0);
-    use egui::FontFamily::{Monospace, Proportional};
-    use egui::TextStyle::{Body, Button, Heading, Monospace as MonoStyle, Small};
+    style.spacing.button_padding = egui::vec2(11.0, 7.0);
+    use egui::TextStyle::{Body, Button, Heading, Monospace as Mono, Small};
     style.text_styles = [
-        (Heading, FontId::new(26.0, Proportional)),
-        (Body, FontId::new(15.0, Proportional)),
-        (Button, FontId::new(15.0, Proportional)),
-        (Small, FontId::new(12.0, Proportional)),
-        (MonoStyle, FontId::new(13.0, Monospace)),
+        (Heading, FontId::new(19.0, sb_family())),
+        (Body, FontId::new(14.0, FontFamily::Proportional)),
+        (Button, FontId::new(13.5, med_family())),
+        (Small, FontId::new(11.5, FontFamily::Proportional)),
+        (Mono, FontId::new(12.0, FontFamily::Monospace)),
     ]
     .into();
     ctx.set_style(style);
 }
 
+#[derive(Clone)]
 struct DevSettings {
     preset: usize,
     audio: bool,
@@ -151,18 +475,23 @@ struct Dashboard {
     settings: HashMap<String, DevSettings>, // serial -> per-device config
     tab: Tab,
     egui_ctx: Option<egui::Context>, // for repainting when a mirror reports status
+    dark: bool,
+    pal: Palette,
 }
 
 impl Dashboard {
-    fn new() -> Self {
+    fn new(cfg: AppConfig) -> Self {
+        let dark = cfg.dark;
         let mut d = Self {
             devices: Vec::new(),
             last_refresh: Instant::now() - Duration::from_secs(10),
             status: String::new(),
             running: HashMap::new(),
-            settings: HashMap::new(),
+            settings: cfg.settings,
             tab: Tab::Devices,
             egui_ctx: None,
+            dark,
+            pal: Palette::new(dark),
         };
         d.refresh();
         d
@@ -247,6 +576,12 @@ impl Dashboard {
             }
             self.status = format!("Stopped · {serial}");
         }
+    }
+
+    fn toggle_theme(&mut self, ctx: &egui::Context) {
+        self.dark = !self.dark;
+        self.pal = Palette::new(self.dark);
+        setup_style(ctx, &self.pal);
     }
 }
 
@@ -353,223 +688,242 @@ impl eframe::App for Dashboard {
         }
         ctx.request_repaint_after(Duration::from_secs(1));
 
+        let pal = self.pal;
+        let mut theme_clicked = false;
+        let mut config_changed = false;
+
         egui::CentralPanel::default()
-            .frame(egui::Frame::default().fill(BG).inner_margin(egui::Margin::same(18.0)))
+            .frame(egui::Frame::default().fill(pal.bg).inner_margin(egui::Margin::same(18.0)))
             .show(ctx, |ui| {
-                // Header / wordmark
+                // ---- header ------------------------------------------------
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("◆").size(20.0).color(CYAN));
+                    ui.label(RichText::new("◆").size(15.0).color(pal.accent));
+                    ui.add_space(1.0);
+                    ui.label(sb("PrismDesk", 18.0, pal.text));
                     ui.add_space(2.0);
-                    ui.label(RichText::new("Prism").size(26.0).strong().color(ACCENT));
-                    ui.add_space(-4.0);
-                    ui.label(RichText::new("Desk").size(26.0).strong().color(TEXT));
+                    pill(
+                        ui,
+                        RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
+                            .small()
+                            .color(pal.accent),
+                        pal.accent_weak,
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let (tico, ttip) = if self.dark {
+                            (ic::SUN, "Switch to light theme")
+                        } else {
+                            (ic::MOON, "Switch to dark theme")
+                        };
+                        if icon_button(ui, &pal, tico, ttip).clicked() {
+                            theme_clicked = true;
+                        }
+                        if icon_button(ui, &pal, ic::REFRESH, "Refresh devices").clicked() {
+                            self.refresh();
+                            self.last_refresh = Instant::now();
+                        }
+                        let n = self.devices.len();
+                        ui.label(
+                            RichText::new(format!("{n} device{}", if n == 1 { "" } else { "s" }))
+                                .small()
+                                .color(pal.dim),
+                        );
+                    });
                 });
-                ui.label(RichText::new("Android screen mirroring").color(DIM));
-                accent_rule(ui);
+
+                accent_rule(ui, &pal);
                 ui.add_space(10.0);
 
-                // Tab bar
+                // ---- tabs --------------------------------------------------
                 ui.horizontal(|ui| {
-                    for (tab, name) in [
-                        (Tab::Devices, "Devices"),
-                        (Tab::Shortcuts, "Shortcuts"),
-                        (Tab::About, "About"),
+                    for (tab, ch, name) in [
+                        (Tab::Devices, ic::MONITOR, "Devices"),
+                        (Tab::Shortcuts, ic::KEYBOARD, "Shortcuts"),
+                        (Tab::About, ic::INFO, "About"),
                     ] {
                         let sel = self.tab == tab;
-                        let txt = RichText::new(name)
-                            .strong()
-                            .color(if sel { ACCENT } else { DIM });
-                        if ui.add(egui::Button::new(txt).frame(false)).clicked() {
+                        let col = if sel { pal.accent } else { pal.dim };
+                        let job = icon_label(ch, name, col, col);
+                        if ui.add(egui::Button::new(job).frame(false)).clicked() {
                             self.tab = tab;
                         }
                     }
                 });
-                ui.add_space(10.0);
+                ui.add_space(12.0);
 
                 if self.tab == Tab::Shortcuts {
-                    shortcuts_view(ui);
+                    shortcuts_view(ui, &pal);
                     return;
                 }
                 if self.tab == Tab::About {
-                    about_view(ui);
+                    about_view(ui, &pal);
                     return;
                 }
 
-                ui.label(RichText::new("DEVICES").small().color(DIM).strong());
-                ui.add_space(6.0);
+                // ---- devices ----------------------------------------------
+                ui.label(RichText::new("DEVICES").small().color(pal.dim).strong());
+                ui.add_space(8.0);
 
                 let devices = self.devices.clone();
                 if devices.is_empty() {
-                    egui::Frame::default()
-                        .fill(SURFACE)
-                        .rounding(Rounding::same(10.0))
-                        .inner_margin(egui::Margin::same(16.0))
-                        .show(ui, |ui| {
-                            ui.label(RichText::new("No device found").color(TEXT).strong());
-                            ui.label(
-                                RichText::new("Connect a phone via USB with debugging enabled.")
-                                    .small()
-                                    .color(DIM),
-                            );
-                        });
+                    empty_state(ui, &pal);
                 }
 
                 for d in &devices {
                     // Scope every widget in this card by the device serial so
-                    // identical buttons/combos across cards get unique egui ids
-                    // (otherwise multiple devices' controls collide and clicks
-                    // land on the wrong — or no — device).
+                    // identical buttons/combos across cards get unique egui ids.
                     ui.push_id(&d.serial, |ui| {
-                    egui::Frame::default()
-                        .fill(SURFACE)
-                        .rounding(Rounding::same(10.0))
-                        .inner_margin(egui::Margin::same(14.0))
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.vertical(|ui| {
-                                    ui.label(RichText::new(&d.model).size(16.0).strong().color(TEXT));
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            RichText::new(" USB ")
-                                                .small()
-                                                .color(BG)
-                                                .background_color(CYAN),
-                                        );
-                                        ui.label(RichText::new(&d.serial).small().color(DIM));
-                                    });
-                                });
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if !d.authorized {
-                                            ui.label(RichText::new("unauthorized").color(WARN));
-                                        } else if self.running.contains_key(&d.serial) {
-                                            let btn = egui::Button::new(
-                                                RichText::new("Stop").color(Color32::WHITE).strong(),
-                                            )
-                                            .fill(STOP)
-                                            .rounding(Rounding::same(8.0))
-                                            .min_size(egui::vec2(112.0, 34.0));
-                                            if ui.add(btn).clicked() {
-                                                self.stop_mirror(&d.serial);
-                                            }
-                                        } else {
-                                            let btn = egui::Button::new(
-                                                RichText::new("Start Mirror")
-                                                    .color(Color32::WHITE)
-                                                    .strong(),
-                                            )
-                                            .fill(ACCENT)
-                                            .rounding(Rounding::same(8.0))
-                                            .min_size(egui::vec2(112.0, 34.0));
-                                            if ui.add(btn).clicked() {
-                                                self.start_mirror(&d.serial);
-                                            }
-                                        }
-                                    },
-                                );
+                        egui::Frame::default()
+                            .fill(pal.surface)
+                            .stroke(Stroke::new(1.0, pal.border))
+                            .rounding(Rounding::same(12.0))
+                            .inner_margin(egui::Margin::same(14.0))
+                            .show(ui, |ui| {
+                                config_changed |= device_card(ui, &pal, d, self);
                             });
-                            if d.authorized {
-                                ui.add_space(8.0);
-                                if self.running.contains_key(&d.serial) {
-                                    // Live: dashboard-driven capture controls
-                                    // (mirror window need not be focused).
-                                    let audio_on = self
-                                        .settings
-                                        .get(&d.serial)
-                                        .map(|s| s.audio)
-                                        .unwrap_or(true);
-                                    ui.horizontal(|ui| {
-                                        if action_btn(ui, "Snapshot", SURFACE2, TEXT).clicked() {
-                                            let ok = self
-                                                .running
-                                                .get_mut(&d.serial)
-                                                .map(|p| p.send("snapshot"))
-                                                .unwrap_or(false);
-                                            self.status = if ok {
-                                                format!("Snapshot · {}", d.model)
-                                            } else {
-                                                format!("Snapshot failed · {} not reachable", d.model)
-                                            };
-                                        }
-                                        // Label reflects the mirror's reported
-                                        // state (updated via the status channel),
-                                        // so it stays right even for Ctrl+R toggles.
-                                        let rec = self
-                                            .running
-                                            .get(&d.serial)
-                                            .map(|p| p.recording.load(Ordering::Relaxed))
-                                            .unwrap_or(false);
-                                        let (rlabel, rfill, rtext) = if rec {
-                                            ("Stop Rec", STOP, Color32::WHITE)
-                                        } else {
-                                            ("Record", SURFACE2, TEXT)
-                                        };
-                                        if action_btn(ui, rlabel, rfill, rtext).clicked() {
-                                            let ok = self
-                                                .running
-                                                .get(&d.serial)
-                                                .map(|p| p.send("record"))
-                                                .unwrap_or(false);
-                                            self.status = if ok {
-                                                format!("{} · {}", if rec { "Stopping recording" } else { "Recording" }, d.model)
-                                            } else {
-                                                format!("Record failed · {} not reachable", d.model)
-                                            };
-                                        }
-                                        if audio_on {
-                                            let muted = self
-                                                .running
-                                                .get(&d.serial)
-                                                .map(|p| p.muted.load(Ordering::Relaxed))
-                                                .unwrap_or(false);
-                                            let mlabel = if muted { "Unmute" } else { "Mute" };
-                                            if action_btn(ui, mlabel, SURFACE2, TEXT).clicked() {
-                                                let ok = self
-                                                    .running
-                                                    .get(&d.serial)
-                                                    .map(|p| p.send("mute"))
-                                                    .unwrap_or(false);
-                                                self.status = if ok {
-                                                    format!("{} · {}", if muted { "Unmuting" } else { "Muting" }, d.model)
-                                                } else {
-                                                    format!("Mute failed · {} not reachable", d.model)
-                                                };
-                                            }
-                                        }
-                                    });
-                                } else {
-                                    // Idle: per-device quality/config.
-                                    let s = self.settings.entry(d.serial.clone()).or_default();
-                                    ui.horizontal(|ui| {
-                                        egui::ComboBox::from_id_salt(("p", d.serial.as_str()))
-                                            .selected_text(PRESETS[s.preset])
-                                            .width(120.0)
-                                            .show_ui(ui, |ui| {
-                                                for (i, p) in PRESETS.iter().enumerate() {
-                                                    ui.selectable_value(&mut s.preset, i, *p);
-                                                }
-                                            });
-                                        ui.checkbox(&mut s.audio, RichText::new("Audio").color(TEXT));
-                                        ui.checkbox(&mut s.input, RichText::new("Input").color(TEXT));
-                                    });
-                                }
-                            }
-                        });
                     });
-                    ui.add_space(8.0);
+                    ui.add_space(10.0);
                 }
 
                 if !self.status.is_empty() {
-                    ui.add_space(6.0);
-                    ui.label(RichText::new(&self.status).small().color(CYAN));
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(&self.status).small().color(pal.cyan));
                 }
             });
+
+        if theme_clicked {
+            self.toggle_theme(ctx);
+            config_changed = true;
+        }
+        if config_changed {
+            save_config(self.dark, &self.settings);
+        }
     }
 }
 
+/// Render one device card's contents. Returns true if a persisted setting
+/// changed (so the caller writes config). Split out to keep `update` readable.
+fn device_card(ui: &mut egui::Ui, pal: &Palette, d: &Device, app: &mut Dashboard) -> bool {
+    let mut changed = false;
+    let running = app.running.contains_key(&d.serial);
+
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.label(sb(&d.model, 15.5, pal.text));
+            ui.add_space(3.0);
+            ui.horizontal(|ui| {
+                pill(
+                    ui,
+                    RichText::new("USB").small().color(pal.cyan),
+                    pal.cyan_weak,
+                );
+                ui.label(RichText::new(&d.serial).monospace().small().color(pal.dim));
+            });
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if !d.authorized {
+                ui.label(RichText::new("unauthorized").color(pal.warn));
+            } else if running {
+                let btn = egui::Button::new(icon_label(ic::POWER, "Stop", pal.live, pal.live))
+                    .fill(pal.live_weak)
+                    .stroke(Stroke::new(1.0, pal.live))
+                    .rounding(Rounding::same(8.0))
+                    .min_size(egui::vec2(96.0, 34.0));
+                if ui.add(btn).clicked() {
+                    app.stop_mirror(&d.serial);
+                }
+            } else {
+                let btn = egui::Button::new(icon_label(
+                    ic::PLAY,
+                    "Start Mirror",
+                    pal.on_accent,
+                    pal.on_accent,
+                ))
+                .fill(pal.accent)
+                .rounding(Rounding::same(8.0))
+                .min_size(egui::vec2(128.0, 34.0));
+                if ui.add(btn).clicked() {
+                    app.start_mirror(&d.serial);
+                }
+            }
+        });
+    });
+
+    if !d.authorized {
+        return changed;
+    }
+
+    ui.add_space(10.0);
+    if running {
+        // Live: dashboard-driven capture controls.
+        let audio_on = app.settings.get(&d.serial).map(|s| s.audio).unwrap_or(true);
+        ui.horizontal(|ui| {
+            if action_btn(ui, pal, ic::CAMERA, "Snapshot", pal.surface2, pal.text2).clicked() {
+                let ok = app.running.get(&d.serial).map(|p| p.send("snapshot")).unwrap_or(false);
+                app.status = if ok {
+                    format!("Snapshot · {}", d.model)
+                } else {
+                    format!("Snapshot failed · {} not reachable", d.model)
+                };
+            }
+            // Label + icon reflect the mirror's reported state (status channel),
+            // so they stay right even for in-window Ctrl+R toggles.
+            let rec = app.running.get(&d.serial).map(|p| p.recording.load(Ordering::Relaxed)).unwrap_or(false);
+            let (rch, rlabel, rfill, rcol) = if rec {
+                (ic::SQUARE, "Stop", pal.live_weak, pal.live)
+            } else {
+                (ic::CIRCLE, "Record", pal.surface2, pal.text2)
+            };
+            if action_btn(ui, pal, rch, rlabel, rfill, rcol).clicked() {
+                let ok = app.running.get(&d.serial).map(|p| p.send("record")).unwrap_or(false);
+                app.status = if ok {
+                    format!("{} · {}", if rec { "Stopping recording" } else { "Recording" }, d.model)
+                } else {
+                    format!("Record failed · {} not reachable", d.model)
+                };
+            }
+            if audio_on {
+                let muted = app.running.get(&d.serial).map(|p| p.muted.load(Ordering::Relaxed)).unwrap_or(false);
+                let (mch, mlabel) = if muted { (ic::VOLUME_X, "Unmute") } else { (ic::VOLUME, "Mute") };
+                if action_btn(ui, pal, mch, mlabel, pal.surface2, pal.text2).clicked() {
+                    let ok = app.running.get(&d.serial).map(|p| p.send("mute")).unwrap_or(false);
+                    app.status = if ok {
+                        format!("{} · {}", if muted { "Unmuting" } else { "Muting" }, d.model)
+                    } else {
+                        format!("Mute failed · {} not reachable", d.model)
+                    };
+                }
+            }
+        });
+    } else {
+        // Idle: per-device quality/config.
+        let s = app.settings.entry(d.serial.clone()).or_default();
+        ui.horizontal(|ui| {
+            ui.label(icon_rt(ic::SLIDERS, 14.0, pal.dim));
+            egui::ComboBox::from_id_salt(("preset", d.serial.as_str()))
+                .selected_text(PRESET_LABELS[s.preset])
+                .width(116.0)
+                .show_ui(ui, |ui| {
+                    for (i, label) in PRESET_LABELS.iter().enumerate() {
+                        if ui.selectable_value(&mut s.preset, i, *label).clicked() {
+                            changed = true;
+                        }
+                    }
+                });
+            if ui.checkbox(&mut s.audio, RichText::new("Audio").color(pal.text2)).changed() {
+                changed = true;
+            }
+            if ui.checkbox(&mut s.input, RichText::new("Input").color(pal.text2)).changed() {
+                changed = true;
+            }
+        });
+    }
+    changed
+}
+
+// ============================ shared views ============================
+
 /// A thin cyan→violet accent divider.
-fn accent_rule(ui: &mut egui::Ui) {
+fn accent_rule(ui: &mut egui::Ui, pal: &Palette) {
     ui.add_space(10.0);
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 2.0), egui::Sense::hover());
@@ -578,7 +932,7 @@ fn accent_rule(ui: &mut egui::Ui) {
     for i in 0..steps {
         let t0 = i as f32 / steps as f32;
         let t1 = (i + 1) as f32 / steps as f32;
-        let col = lerp_color(CYAN, ACCENT, (t0 + t1) * 0.5);
+        let col = lerp_color(pal.cyan, pal.accent, (t0 + t1) * 0.5);
         let x0 = rect.left() + rect.width() * t0;
         let x1 = rect.left() + rect.width() * t1;
         painter.rect_filled(
@@ -589,16 +943,52 @@ fn accent_rule(ui: &mut egui::Ui) {
     }
 }
 
-fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
-    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t) as u8;
-    Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
+fn empty_state(ui: &mut egui::Ui, pal: &Palette) {
+    egui::Frame::default()
+        .fill(pal.surface)
+        .stroke(Stroke::new(1.0, pal.border))
+        .rounding(Rounding::same(12.0))
+        .inner_margin(egui::Margin::same(18.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(icon_rt(ic::MONITOR, 22.0, pal.dim));
+                ui.add_space(4.0);
+                ui.vertical(|ui| {
+                    ui.label(sb("No device found", 14.0, pal.text));
+                    ui.label(
+                        RichText::new("Connect a phone via USB with debugging enabled.")
+                            .small()
+                            .color(pal.dim),
+                    );
+                });
+            });
+        });
 }
 
-/// A rounded surface card wrapping arbitrary content.
-fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+/// A capture-action pill button (icon + label).
+fn action_btn(
+    ui: &mut egui::Ui,
+    pal: &Palette,
+    ch: char,
+    label: &str,
+    fill: Color32,
+    text_col: Color32,
+) -> egui::Response {
+    ui.add(
+        egui::Button::new(icon_label(ch, label, text_col, text_col))
+            .fill(fill)
+            .stroke(Stroke::new(1.0, pal.border))
+            .rounding(Rounding::same(8.0))
+            .min_size(egui::vec2(0.0, 32.0)),
+    )
+}
+
+/// A rounded surface card wrapping arbitrary content (Shortcuts/About).
+fn card(ui: &mut egui::Ui, pal: &Palette, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::default()
-        .fill(SURFACE)
-        .rounding(Rounding::same(10.0))
+        .fill(pal.surface)
+        .stroke(Stroke::new(1.0, pal.border))
+        .rounding(Rounding::same(12.0))
         .inner_margin(egui::Margin::same(16.0))
         .show(ui, |ui| {
             ui.set_width(ui.available_width() - 32.0);
@@ -607,76 +997,67 @@ fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(10.0);
 }
 
-/// A small pill button used for the per-device capture actions.
-fn action_btn(ui: &mut egui::Ui, label: &str, fill: Color32, text: Color32) -> egui::Response {
-    ui.add(
-        egui::Button::new(RichText::new(label).color(text).strong())
-            .fill(fill)
-            .rounding(Rounding::same(8.0))
-            .min_size(egui::vec2(0.0, 30.0)),
-    )
-}
-
 /// One "Key  —  meaning" row inside a shortcuts card.
-fn key_row(ui: &mut egui::Ui, keys: &str, what: &str) {
+fn key_row(ui: &mut egui::Ui, pal: &Palette, keys: &str, what: &str) {
     ui.horizontal(|ui| {
-        ui.label(
-            RichText::new(format!(" {keys} "))
-                .monospace()
-                .color(TEXT)
-                .background_color(SURFACE2),
+        pill(
+            ui,
+            RichText::new(keys).monospace().small().color(pal.text),
+            pal.surface2,
         );
         ui.add_space(4.0);
-        ui.label(RichText::new(what).color(DIM));
+        ui.label(RichText::new(what).color(pal.dim));
     });
-    ui.add_space(4.0);
+    ui.add_space(5.0);
 }
 
-fn shortcuts_view(ui: &mut egui::Ui) {
-    ui.label(RichText::new("KEYBOARD & MOUSE").small().color(DIM).strong());
+fn shortcuts_view(ui: &mut egui::Ui, pal: &Palette) {
+    ui.label(RichText::new("KEYBOARD & MOUSE").small().color(pal.dim).strong());
     ui.add_space(6.0);
-    card(ui, |ui| {
-        ui.label(RichText::new("In the mirror window").color(TEXT).strong());
+    card(ui, pal, |ui| {
+        ui.label(sb("In the mirror window", 14.0, pal.text));
         ui.add_space(8.0);
-        key_row(ui, "Left click / drag", "Tap & swipe on the device");
-        key_row(ui, "Mouse wheel", "Scroll");
-        key_row(ui, "Right click", "Back");
-        key_row(ui, "Type", "Send text to the focused field");
-        key_row(ui, "Backspace / Enter / Tab / arrows", "Sent as key events");
+        key_row(ui, pal, "Left click / drag", "Tap & swipe on the device");
+        key_row(ui, pal, "Mouse wheel", "Scroll");
+        key_row(ui, pal, "Right click", "Back");
+        key_row(ui, pal, "Type", "Send text to the focused field");
+        key_row(ui, pal, "Backspace / Enter / Tab / arrows", "Sent as key events");
     });
-    card(ui, |ui| {
-        ui.label(RichText::new("Hotkeys").color(TEXT).strong());
+    card(ui, pal, |ui| {
+        ui.label(sb("Hotkeys", 14.0, pal.text));
         ui.add_space(8.0);
-        key_row(ui, "F11", "Toggle borderless fullscreen");
-        key_row(ui, "Ctrl + M", "Mute / unmute device audio");
-        key_row(ui, "Ctrl + S", "Save a screenshot (PNG)");
-        key_row(ui, "Ctrl + R", "Start / stop recording (MP4)");
-        key_row(ui, "Ctrl + V", "Paste PC clipboard to the device");
+        key_row(ui, pal, "F11", "Toggle borderless fullscreen");
+        key_row(ui, pal, "Ctrl + M", "Mute / unmute device audio");
+        key_row(ui, pal, "Ctrl + S", "Save a screenshot (PNG)");
+        key_row(ui, pal, "Ctrl + R", "Start / stop recording (MP4)");
+        key_row(ui, pal, "Ctrl + V", "Paste PC clipboard to the device");
     });
     ui.label(
         RichText::new("Screenshots and recordings are written next to the app executable.")
             .small()
-            .color(DIM),
+            .color(pal.dim),
     );
 }
 
-fn about_view(ui: &mut egui::Ui) {
-    ui.label(RichText::new("ABOUT").small().color(DIM).strong());
+fn about_view(ui: &mut egui::Ui, pal: &Palette) {
+    ui.label(RichText::new("ABOUT").small().color(pal.dim).strong());
     ui.add_space(6.0);
-    card(ui, |ui| {
+    card(ui, pal, |ui| {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("PrismDesk").size(22.0).strong().color(TEXT));
-            ui.label(
-                RichText::new(concat!(" v", env!("CARGO_PKG_VERSION"), " "))
+            ui.label(sb("PrismDesk", 20.0, pal.text));
+            ui.add_space(2.0);
+            pill(
+                ui,
+                RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
                     .small()
-                    .color(BG)
-                    .background_color(ACCENT),
+                    .color(pal.accent),
+                pal.accent_weak,
             );
         });
         ui.add_space(4.0);
         ui.label(
             RichText::new("Low-latency Android screen mirroring & control for Windows.")
-                .color(DIM),
+                .color(pal.dim),
         );
         ui.add_space(8.0);
         ui.label(
@@ -685,11 +1066,11 @@ fn about_view(ui: &mut egui::Ui) {
                  flip-model D3D11 presentation, and a scrcpy-compatible transport.",
             )
             .small()
-            .color(DIM),
+            .color(pal.dim),
         );
     });
-    card(ui, |ui| {
-        ui.label(RichText::new("Open-source components").color(TEXT).strong());
+    card(ui, pal, |ui| {
+        ui.label(sb("Open-source components", 14.0, pal.text));
         ui.add_space(8.0);
         for (name, lic) in [
             ("scrcpy protocol (Genymobile)", "Apache-2.0"),
@@ -698,11 +1079,13 @@ fn about_view(ui: &mut egui::Ui) {
             ("cpal", "Apache-2.0"),
             ("mp4-rust", "MIT"),
             ("clipboard-win", "MIT / Apache-2.0"),
+            ("Geist font", "OFL-1.1"),
+            ("Lucide icons", "ISC"),
         ] {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(name).color(TEXT));
+                ui.label(RichText::new(name).color(pal.text2));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(lic).small().color(DIM));
+                    ui.label(RichText::new(lic).small().color(pal.dim));
                 });
             });
             ui.add_space(2.0);
@@ -711,7 +1094,7 @@ fn about_view(ui: &mut egui::Ui) {
     ui.label(
         RichText::new("Uses adb from the Android SDK platform-tools. Not affiliated with Google or Genymobile.")
             .small()
-            .color(DIM),
+            .color(pal.dim),
     );
 }
 
