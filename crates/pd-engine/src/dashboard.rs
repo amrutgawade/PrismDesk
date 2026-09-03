@@ -113,12 +113,20 @@ impl Default for DevSettings {
     }
 }
 
+#[derive(PartialEq, Clone, Copy)]
+enum Tab {
+    Devices,
+    Shortcuts,
+    About,
+}
+
 struct Dashboard {
     devices: Vec<Device>,
     last_refresh: Instant,
     status: String,
-    running: HashMap<String, Child>,       // serial -> live mirror process
+    running: HashMap<String, Child>,        // serial -> live mirror process
     settings: HashMap<String, DevSettings>, // serial -> per-device config
+    tab: Tab,
 }
 
 impl Dashboard {
@@ -129,6 +137,7 @@ impl Dashboard {
             status: String::new(),
             running: HashMap::new(),
             settings: HashMap::new(),
+            tab: Tab::Devices,
         };
         d.refresh();
         d
@@ -194,7 +203,35 @@ impl eframe::App for Dashboard {
                 });
                 ui.label(RichText::new("Android screen mirroring").color(DIM));
                 accent_rule(ui);
-                ui.add_space(12.0);
+                ui.add_space(10.0);
+
+                // Tab bar
+                ui.horizontal(|ui| {
+                    for (tab, name) in [
+                        (Tab::Devices, "Devices"),
+                        (Tab::Shortcuts, "Shortcuts"),
+                        (Tab::About, "About"),
+                    ] {
+                        let sel = self.tab == tab;
+                        let txt = RichText::new(name)
+                            .strong()
+                            .color(if sel { ACCENT } else { DIM });
+                        if ui.add(egui::Button::new(txt).frame(false)).clicked() {
+                            self.tab = tab;
+                        }
+                    }
+                });
+                ui.add_space(10.0);
+
+                if self.tab == Tab::Shortcuts {
+                    shortcuts_view(ui);
+                    return;
+                }
+                if self.tab == Tab::About {
+                    about_view(ui);
+                    return;
+                }
+
                 ui.label(RichText::new("DEVICES").small().color(DIM).strong());
                 ui.add_space(6.0);
 
@@ -319,6 +356,117 @@ fn accent_rule(ui: &mut egui::Ui) {
 fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t) as u8;
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
+}
+
+/// A rounded surface card wrapping arbitrary content.
+fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::default()
+        .fill(SURFACE)
+        .rounding(Rounding::same(10.0))
+        .inner_margin(egui::Margin::same(16.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width() - 32.0);
+            add(ui);
+        });
+    ui.add_space(10.0);
+}
+
+/// One "Key  —  meaning" row inside a shortcuts card.
+fn key_row(ui: &mut egui::Ui, keys: &str, what: &str) {
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(format!(" {keys} "))
+                .monospace()
+                .color(TEXT)
+                .background_color(SURFACE2),
+        );
+        ui.add_space(4.0);
+        ui.label(RichText::new(what).color(DIM));
+    });
+    ui.add_space(4.0);
+}
+
+fn shortcuts_view(ui: &mut egui::Ui) {
+    ui.label(RichText::new("KEYBOARD & MOUSE").small().color(DIM).strong());
+    ui.add_space(6.0);
+    card(ui, |ui| {
+        ui.label(RichText::new("In the mirror window").color(TEXT).strong());
+        ui.add_space(8.0);
+        key_row(ui, "Left click / drag", "Tap & swipe on the device");
+        key_row(ui, "Mouse wheel", "Scroll");
+        key_row(ui, "Right click", "Back");
+        key_row(ui, "Type", "Send text to the focused field");
+        key_row(ui, "Backspace / Enter / Tab / arrows", "Sent as key events");
+    });
+    card(ui, |ui| {
+        ui.label(RichText::new("Hotkeys").color(TEXT).strong());
+        ui.add_space(8.0);
+        key_row(ui, "F11", "Toggle borderless fullscreen");
+        key_row(ui, "Ctrl + M", "Mute / unmute device audio");
+        key_row(ui, "Ctrl + S", "Save a screenshot (PNG)");
+        key_row(ui, "Ctrl + R", "Start / stop recording (MP4)");
+        key_row(ui, "Ctrl + V", "Paste PC clipboard to the device");
+    });
+    ui.label(
+        RichText::new("Screenshots and recordings are written next to the app executable.")
+            .small()
+            .color(DIM),
+    );
+}
+
+fn about_view(ui: &mut egui::Ui) {
+    ui.label(RichText::new("ABOUT").small().color(DIM).strong());
+    ui.add_space(6.0);
+    card(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("PrismDesk").size(22.0).strong().color(TEXT));
+            ui.label(
+                RichText::new(concat!(" v", env!("CARGO_PKG_VERSION"), " "))
+                    .small()
+                    .color(BG)
+                    .background_color(ACCENT),
+            );
+        });
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("Low-latency Android screen mirroring & control for Windows.")
+                .color(DIM),
+        );
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new(
+                "Hardware H.264/H.265 decode via Media Foundation (NVDEC), \
+                 flip-model D3D11 presentation, and a scrcpy-compatible transport.",
+            )
+            .small()
+            .color(DIM),
+        );
+    });
+    card(ui, |ui| {
+        ui.label(RichText::new("Open-source components").color(TEXT).strong());
+        ui.add_space(8.0);
+        for (name, lic) in [
+            ("scrcpy protocol (Genymobile)", "Apache-2.0"),
+            ("egui / eframe", "MIT / Apache-2.0"),
+            ("windows-rs", "MIT / Apache-2.0"),
+            ("cpal", "Apache-2.0"),
+            ("mp4-rust", "MIT"),
+            ("clipboard-win", "MIT / Apache-2.0"),
+        ] {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(name).color(TEXT));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(lic).small().color(DIM));
+                });
+            });
+            ui.add_space(2.0);
+        }
+    });
+    ui.label(
+        RichText::new("Uses adb from the Android SDK platform-tools. Not affiliated with Google or Genymobile.")
+            .small()
+            .color(DIM),
+    );
 }
 
 fn list_devices() -> Vec<Device> {
