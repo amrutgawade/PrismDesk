@@ -43,11 +43,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 const VK_F11: usize = 0x7A;
 const VK_M: usize = 0x4D;
+const VK_S: usize = 0x53;
 
 /// Set by the window proc on F11; consumed by `pump` to toggle fullscreen.
 static TOGGLE_FS: AtomicBool = AtomicBool::new(false);
 /// Set by the window proc on M; consumed by the engine to toggle audio mute.
 static TOGGLE_MUTE: AtomicBool = AtomicBool::new(false);
+/// Set by the window proc on S; consumed by the engine to take a screenshot.
+static TOGGLE_SHOT: AtomicBool = AtomicBool::new(false);
 
 mod video;
 use video::Video;
@@ -117,6 +120,30 @@ impl Mirror {
     /// True once if the user pressed M since the last check (audio mute toggle).
     pub fn mute_toggled(&self) -> bool {
         TOGGLE_MUTE.swap(false, Ordering::Relaxed)
+    }
+
+    /// True once if the user pressed S since the last check (screenshot).
+    pub fn shot_requested(&self) -> bool {
+        TOGGLE_SHOT.swap(false, Ordering::Relaxed)
+    }
+
+    /// Save the current frame at native video resolution to a PNG. Returns false
+    /// if no frame has been rendered yet.
+    pub fn screenshot(&mut self, path: &str) -> Result<bool> {
+        let device = self.device.clone();
+        let ctx = self.context.clone();
+        let shot = match &self.video {
+            Some(v) => unsafe { v.render_offscreen(&device, &ctx)? },
+            None => None,
+        };
+        match shot {
+            Some((w, h, bgra)) => {
+                write_png_bgra(path, w, h, &bgra)
+                    .map_err(|_| windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 
     /// The D3D11 device this window renders with. The decoder must share it so
@@ -293,6 +320,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     TOGGLE_FS.store(true, Ordering::Relaxed);
                 } else if wparam.0 == VK_M {
                     TOGGLE_MUTE.store(true, Ordering::Relaxed);
+                } else if wparam.0 == VK_S {
+                    TOGGLE_SHOT.store(true, Ordering::Relaxed);
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
@@ -399,4 +428,25 @@ unsafe fn create_swapchain(
 fn wchars_to_string(w: &[u16]) -> String {
     let end = w.iter().position(|&c| c == 0).unwrap_or(w.len());
     String::from_utf16_lossy(&w[..end])
+}
+
+fn write_png_bgra(path: &str, w: u32, h: u32, bgra: &[u8]) -> std::io::Result<()> {
+    let mut rgba = vec![0u8; bgra.len()];
+    for (i, px) in bgra.chunks_exact(4).enumerate() {
+        let o = i * 4;
+        rgba[o] = px[2]; // R <- B
+        rgba[o + 1] = px[1]; // G
+        rgba[o + 2] = px[0]; // B <- R
+        rgba[o + 3] = 255; // A (opaque)
+    }
+    let file = std::fs::File::create(path)?;
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    let mut wr = enc
+        .write_header()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    wr.write_image_data(&rgba)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    Ok(())
 }

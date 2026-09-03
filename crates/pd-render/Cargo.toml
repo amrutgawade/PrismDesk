@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 windows-core.workspace = true
+png = "0.17"
 
 [dependencies.windows]
 workspace = true

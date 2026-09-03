@@ -14,13 +14,15 @@ use windows::Win32::Graphics::Direct3D::{
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11PixelShader, ID3D11RenderTargetView,
     ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
-    D3D11_BIND_SHADER_RESOURCE, D3D11_COMPARISON_NEVER, D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_COMPARISON_NEVER,
+    D3D11_CPU_ACCESS_READ, D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
     D3D11_SAMPLER_DESC, D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_SHADER_RESOURCE_VIEW_DESC_0,
-    D3D11_TEX2D_SRV, D3D11_TEXTURE2D_DESC,
-    D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_USAGE_DEFAULT, D3D11_VIEWPORT,
+    D3D11_TEX2D_SRV, D3D11_TEXTURE2D_DESC, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_USAGE_DEFAULT,
+    D3D11_USAGE_STAGING, D3D11_VIEWPORT,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT_NV12, DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8_UNORM, DXGI_SAMPLE_DESC,
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8_UNORM,
+    DXGI_SAMPLE_DESC,
 };
 
 const SHADER: &str = r#"
@@ -213,6 +215,88 @@ impl Video {
             ctx.PSSetShaderResources(0, Some(&none_srvs));
         }
         Ok(())
+    }
+
+    /// Render the current frame at native video resolution (no letterbox) and
+    /// read it back as BGRA bytes. Used for screenshots. None if no frame yet.
+    pub unsafe fn render_offscreen(
+        &self,
+        device: &ID3D11Device,
+        ctx: &ID3D11DeviceContext,
+    ) -> Result<Option<(u32, u32, Vec<u8>)>> {
+        let (w, h) = self.size;
+        if self.nv12.is_none() || w == 0 || h == 0 {
+            return Ok(None);
+        }
+
+        let rt_desc = D3D11_TEXTURE2D_DESC {
+            Width: w,
+            Height: h,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+            ..Default::default()
+        };
+        let mut rt: Option<ID3D11Texture2D> = None;
+        device.CreateTexture2D(&rt_desc, None, Some(&mut rt))?;
+        let rt = rt.unwrap();
+        let mut rtv: Option<ID3D11RenderTargetView> = None;
+        device.CreateRenderTargetView(&rt, None, Some(&mut rtv))?;
+        let rtv = rtv.unwrap();
+
+        let vp = D3D11_VIEWPORT {
+            TopLeftX: 0.0,
+            TopLeftY: 0.0,
+            Width: w as f32,
+            Height: h as f32,
+            MinDepth: 0.0,
+            MaxDepth: 1.0,
+        };
+        ctx.RSSetViewports(Some(&[vp]));
+        let rtvs = [Some(rtv)];
+        ctx.OMSetRenderTargets(Some(&rtvs), None);
+        ctx.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx.VSSetShader(&self.vs, None);
+        ctx.PSSetShader(&self.ps, None);
+        let srvs = [self.luma.clone(), self.chroma.clone()];
+        ctx.PSSetShaderResources(0, Some(&srvs));
+        let samps = [Some(self.sampler.clone())];
+        ctx.PSSetSamplers(0, Some(&samps));
+        ctx.Draw(3, 0);
+        let none_srvs: [Option<ID3D11ShaderResourceView>; 2] = [None, None];
+        ctx.PSSetShaderResources(0, Some(&none_srvs));
+
+        let st_desc = D3D11_TEXTURE2D_DESC {
+            Width: w,
+            Height: h,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            ..Default::default()
+        };
+        let mut stage: Option<ID3D11Texture2D> = None;
+        device.CreateTexture2D(&st_desc, None, Some(&mut stage))?;
+        let stage = stage.unwrap();
+        ctx.CopyResource(&stage, &rt);
+
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        ctx.Map(&stage, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+        let row = (w as usize) * 4;
+        let mut out = vec![0u8; row * h as usize];
+        let src = mapped.pData as *const u8;
+        let pitch = mapped.RowPitch as usize;
+        for y in 0..h as usize {
+            std::ptr::copy_nonoverlapping(src.add(y * pitch), out.as_mut_ptr().add(y * row), row);
+        }
+        ctx.Unmap(&stage, 0);
+        Ok(Some((w, h, out)))
     }
 }
 

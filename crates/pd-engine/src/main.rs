@@ -83,7 +83,7 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
     let mut mirror = Mirror::new(500, 1040, "PrismDesk — Live Mirror")?;
     println!("PrismDesk · live mirror (USB, adb reverse)");
     println!(
-        "  {} · max_size={} · {} Mbps · {} fps · F11 fullscreen · M mute · close window to stop",
+        "  {} · max_size={} · {} Mbps · {} fps · F11 fullscreen · M mute · S screenshot · close to stop",
         cfg.codec, cfg.max_size, cfg.bitrate / 1_000_000, cfg.fps
     );
 
@@ -159,6 +159,14 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
             if mirror.mute_toggled() {
                 if let Some(sk) = &sink {
                     println!("[audio] {}", if sk.toggle_mute() { "muted" } else { "unmuted" });
+                }
+            }
+            if mirror.shot_requested() {
+                let path = screenshot_path();
+                match mirror.screenshot(&path) {
+                    Ok(true) => println!("[shot] saved {path}"),
+                    Ok(false) => eprintln!("[shot] no frame yet"),
+                    Err(e) => eprintln!("[shot] {e:?}"),
                 }
             }
             let mut latest = None;
@@ -281,6 +289,17 @@ fn blank_demo() -> windows_core::Result<()> {
         std::thread::sleep(Duration::from_millis(4));
     }
     Ok(())
+}
+
+fn screenshot_path() -> String {
+    let base = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
+    let dir = format!("{base}\\Pictures\\PrismDesk");
+    let _ = std::fs::create_dir_all(&dir);
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("{dir}\\prismdesk-{ms}.png")
 }
 
 fn find_capture() -> String {
