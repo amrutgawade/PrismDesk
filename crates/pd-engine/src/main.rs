@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use pd_decode::Decoder;
 use pd_render::Mirror;
 
+mod aac;
 mod control;
 mod record;
 mod transport;
@@ -106,6 +107,12 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
     let mut backoff = Duration::from_millis(200);
     let cap = Duration::from_secs(5);
     let mut recorder: Option<record::Recorder> = None; // persists across reconnects
+    // Rolling current-GOP buffer so recording can start instantly from the last
+    // keyframe (this device's keyframes are ~10 s apart).
+    let mut gop_config: Option<Vec<u8>> = None;
+    let mut gop: Vec<(Vec<u8>, i64, bool)> = Vec::new(); // (data, pts_us, is_key)
+    let rec_audio: std::sync::Arc<std::sync::Mutex<Vec<u8>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new())); // PCM tap for recording
 
     'session: loop {
         // Bring up a session; on failure (device unplugged/sleeping) retry with
@@ -147,10 +154,18 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
         });
 
         // Audio producer: raw PCM off the audio socket -> sink; ends on close.
+        let ra = rec_audio.clone();
         let audio_net = match (audio_stream, sink.clone()) {
             (Some(mut a), Some(sk)) => Some(std::thread::spawn(move || loop {
                 match transport::read_frame(&mut a) {
-                    Ok(au) => sk.push_pcm_s16(&au.data),
+                    Ok(au) => {
+                        sk.push_pcm_s16(&au.data);
+                        if let Ok(mut b) = ra.lock() {
+                            if b.len() < 48000 * 2 * 2 {
+                                b.extend_from_slice(&au.data); // ~1 s cap
+                            }
+                        }
+                    }
                     Err(_) => break,
                 }
             })),
@@ -205,11 +220,16 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
                     }
                 } else {
                     let (w, h) = mirror.video_size();
-                    if w > 0 && h > 0 {
-                        recorder = Some(record::Recorder::new(rec_path(), w as u16, h as u16));
-                        println!("[rec] recording... press R again to stop");
+                    if let (Some(cfg), true) = (&gop_config, w > 0 && h > 0 && !gop.is_empty()) {
+                        let mut r = record::Recorder::new(rec_path(), w as u16, h as u16);
+                        r.feed(cfg, 0, true, true); // SPS/PPS
+                        for (d, pts, key) in &gop {
+                            r.feed(d, *pts, *key, false); // replay current GOP (starts at keyframe)
+                        }
+                        recorder = Some(r);
+                        println!("[rec] recording... press Ctrl+R to stop");
                     } else {
-                        eprintln!("[rec] no video yet");
+                        eprintln!("[rec] no keyframe buffered yet, try again in a moment");
                     }
                 }
             }
@@ -237,6 +257,19 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
                 for kc in mirror.drain_keys() {
                     control::send(ctl, &control::inject_keycode(control::KEY_DOWN, kc, 0, 0));
                     control::send(ctl, &control::inject_keycode(control::KEY_UP, kc, 0, 0));
+                }
+            }
+            // Drain captured PCM into the recorder (dropped when not recording).
+            {
+                let pcm = rec_audio
+                    .lock()
+                    .ok()
+                    .map(|mut b| std::mem::take(&mut *b))
+                    .unwrap_or_default();
+                if !pcm.is_empty() {
+                    if let Some(r) = &mut recorder {
+                        r.feed_audio(&pcm);
+                    }
                 }
             }
             // Mouse -> device touch/scroll injection.
@@ -274,6 +307,18 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
             loop {
                 match rx.try_recv() {
                     Ok(au) => {
+                        // Maintain the rolling GOP (reset on config/keyframe).
+                        if au.is_config {
+                            gop_config = Some(au.data.clone());
+                            gop.clear();
+                        } else {
+                            if au.is_key {
+                                gop.clear();
+                            }
+                            if gop.len() < 1200 {
+                                gop.push((au.data.clone(), au.pts_100ns / 10, au.is_key));
+                            }
+                        }
                         if let Some(r) = &mut recorder {
                             r.feed(&au.data, au.pts_100ns / 10, au.is_key, au.is_config);
                         }

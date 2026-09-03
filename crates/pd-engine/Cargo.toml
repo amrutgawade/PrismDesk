@@ -18,3 +18,11 @@ windows-core.workspace = true
 mp4 = "0.14"
 bytes = "1"
 clipboard-win = "5"
+
+[dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_Media_MediaFoundation",
+]

@@ -653,6 +653,7 @@ dependencies = [
  "pd-audio",
  "pd-decode",
  "pd-render",
+ "windows 0.58.0",
  "windows-core 0.58.0",
 ]
 

@@ -6,30 +6,66 @@ use std::fs::File;
 use std::io::BufWriter;
 
 use bytes::Bytes;
-use mp4::{AvcConfig, FourCC, MediaConfig, Mp4Config, Mp4Sample, Mp4Writer, TrackConfig, TrackType};
+use mp4::{
+    AacConfig, AudioObjectType, AvcConfig, ChannelConfig, FourCC, MediaConfig, Mp4Config, Mp4Sample,
+    Mp4Writer, SampleFreqIndex, TrackConfig, TrackType,
+};
 
 const TIMESCALE: u32 = 1000; // milliseconds
 
+const AAC_BITRATE: u32 = 128_000;
+
 pub struct Recorder {
     writer: Option<Mp4Writer<BufWriter<File>>>,
+    aac: Option<crate::aac::AacEncoder>,
     width: u16,
     height: u16,
     first_pts_us: i64,
     pending: Option<(Vec<u8>, i64, bool)>, // AVCC bytes, pts_us, is_key
     path: String,
     frames: u64,
+    audio_frames: u64,
 }
 
 impl Recorder {
     pub fn new(path: String, width: u16, height: u16) -> Self {
         Self {
             writer: None,
+            aac: None,
             width,
             height,
             first_pts_us: -1,
             pending: None,
             path,
             frames: 0,
+            audio_frames: 0,
+        }
+    }
+
+    /// Feed one raw s16le stereo PCM chunk (only recorded while active).
+    pub fn feed_audio(&mut self, pcm: &[u8]) {
+        // Only record audio once the first video frame is written (A/V aligned).
+        if self.writer.is_none() || self.aac.is_none() || self.frames == 0 {
+            return;
+        }
+        let mut frames = Vec::new();
+        if let Some(enc) = &mut self.aac {
+            enc.encode(pcm, &mut frames);
+        }
+        for f in frames {
+            let start = self.audio_frames * 1024;
+            let sample = Mp4Sample {
+                start_time: start,
+                duration: 1024,
+                rendering_offset: 0,
+                is_sync: true,
+                bytes: Bytes::from(f),
+            };
+            if let Some(w) = &mut self.writer {
+                if w.write_sample(2, &sample).is_ok() {
+                    self.audio_frames += 1;
+                }
+            }
         }
     }
 
@@ -38,15 +74,13 @@ impl Recorder {
         if is_config {
             if self.writer.is_none() {
                 if let Some((sps, pps)) = split_sps_pps(data) {
-                    if let Ok(w) = self.init_writer(&sps, &pps) {
-                        self.writer = Some(w);
-                    }
+                    let _ = self.init(&sps, &pps);
                 }
             }
             return;
         }
         if self.writer.is_none() {
-            return; // wait for the config (SPS/PPS) first
+            return; // wait for the config (SPS/PPS) first; the next frame is the IDR
         }
         if self.first_pts_us < 0 {
             self.first_pts_us = pts_us;
@@ -78,7 +112,7 @@ impl Recorder {
         }
     }
 
-    fn init_writer(&self, sps: &[u8], pps: &[u8]) -> std::io::Result<Mp4Writer<BufWriter<File>>> {
+    fn init(&mut self, sps: &[u8], pps: &[u8]) -> std::io::Result<()> {
         let file = File::create(&self.path)?;
         let cfg = Mp4Config {
             major_brand: FourCC::from(*b"isom"),
@@ -93,7 +127,8 @@ impl Recorder {
         };
         let io_err = |e: mp4::Error| std::io::Error::new(std::io::ErrorKind::Other, e.to_string());
         let mut w = Mp4Writer::write_start(BufWriter::new(file), &cfg).map_err(io_err)?;
-        let track = TrackConfig {
+        // Video track (id 1).
+        w.add_track(&TrackConfig {
             track_type: TrackType::Video,
             timescale: TIMESCALE,
             language: "und".to_string(),
@@ -103,9 +138,27 @@ impl Recorder {
                 seq_param_set: sps.to_vec(),
                 pic_param_set: pps.to_vec(),
             }),
-        };
-        w.add_track(&track).map_err(io_err)?;
-        Ok(w)
+        })
+        .map_err(io_err)?;
+        // Audio track (id 2) — best-effort AAC; video-only if the encoder fails.
+        if let Ok(enc) = crate::aac::AacEncoder::new(AAC_BITRATE) {
+            let atrack = TrackConfig {
+                track_type: TrackType::Audio,
+                timescale: 48000,
+                language: "und".to_string(),
+                media_conf: MediaConfig::AacConfig(AacConfig {
+                    bitrate: AAC_BITRATE,
+                    profile: AudioObjectType::AacLowComplexity,
+                    freq_index: SampleFreqIndex::Freq48000,
+                    chan_conf: ChannelConfig::Stereo,
+                }),
+            };
+            if w.add_track(&atrack).is_ok() {
+                self.aac = Some(enc);
+            }
+        }
+        self.writer = Some(w);
+        Ok(())
     }
 
     /// Finish and flush. Returns (path, frame count).

@@ -111,6 +111,7 @@ pub fn start(
         &format!("control={control_on}"),
         "cleanup=true",
         &format!("video_codec={codec}"),
+        "video_codec_options=i-frame-interval:int=1", // keyframe every 1s (recording/OBS/reconnect)
         &format!("max_size={max_size}"),
         &format!("video_bit_rate={bitrate}"),
         &format!("max_fps={fps}"),
