@@ -7,7 +7,8 @@ use std::collections::HashMap;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -122,23 +123,23 @@ enum Tab {
     About,
 }
 
-/// A live mirror child process plus its control channel and runtime toggles.
+/// A live mirror child process plus its control channel and runtime state.
 /// Commands are pushed to `tx`; a per-mirror writer thread forwards them over a
 /// localhost TCP socket to the child (reliable, ordered — unlike stdin, which
-/// dropped commands when the child was a busy GUI-spawned process).
+/// dropped commands when the child was a busy GUI-spawned process). The mirror
+/// reports its recording/mute state back on the same socket, so `recording` and
+/// `muted` are authoritative and reflect in-window Ctrl+R/M toggles too.
 struct Proc {
     child: Child,
     tx: mpsc::Sender<String>,
-    recording: bool,
-    muted: bool,
+    recording: Arc<AtomicBool>,
+    muted: Arc<AtomicBool>,
 }
 impl Proc {
     /// Queue a command for the mirror. Returns false only if the writer thread
     /// (and thus the control channel) is gone.
-    fn send(&mut self, cmd: &str) -> bool {
-        let ok = self.tx.send(cmd.to_string()).is_ok();
-        crate::debug_log("dash", &format!("queue {cmd:?} -> {ok}"));
-        ok
+    fn send(&self, cmd: &str) -> bool {
+        self.tx.send(cmd.to_string()).is_ok()
     }
 }
 
@@ -149,6 +150,7 @@ struct Dashboard {
     running: HashMap<String, Proc>,         // serial -> live mirror process
     settings: HashMap<String, DevSettings>, // serial -> per-device config
     tab: Tab,
+    egui_ctx: Option<egui::Context>, // for repainting when a mirror reports status
 }
 
 impl Dashboard {
@@ -160,6 +162,7 @@ impl Dashboard {
             running: HashMap::new(),
             settings: HashMap::new(),
             tab: Tab::Devices,
+            egui_ctx: None,
         };
         d.refresh();
         d
@@ -214,11 +217,20 @@ impl Dashboard {
             Ok(child) => {
                 let pid = child.id();
                 let (tx, rx) = mpsc::channel::<String>();
-                spawn_control_writer(listener, rx, pid);
+                let recording = Arc::new(AtomicBool::new(false));
+                let muted = Arc::new(AtomicBool::new(false));
+                spawn_control_io(
+                    listener,
+                    rx,
+                    recording.clone(),
+                    muted.clone(),
+                    self.egui_ctx.clone(),
+                    pid,
+                );
                 crate::debug_log("dash", &format!("spawned {serial} pid={pid} ctrl_port={port}"));
                 self.running.insert(
                     serial.to_string(),
-                    Proc { child, tx, recording: false, muted: false },
+                    Proc { child, tx, recording, muted },
                 );
                 self.status = format!("Mirroring · {serial}");
             }
@@ -238,11 +250,21 @@ impl Dashboard {
     }
 }
 
-/// Accept one mirror's control connection (bounded wait) and forward queued
-/// commands to it as `cmd\n` lines. Commands queued before the child connects
-/// are buffered and delivered on connect, so none are lost. The thread ends when
-/// the command sender is dropped (mirror stopped/reaped) or the socket breaks.
-fn spawn_control_writer(listener: TcpListener, rx: mpsc::Receiver<String>, pid: u32) {
+/// Accept one mirror's control connection (bounded wait), then run the two-way
+/// channel: forward queued commands to it as `cmd\n` lines, and read `rec/mute`
+/// status lines back into the shared flags (repainting the UI so the buttons
+/// track the mirror's true state, including its in-window Ctrl+R/M toggles).
+/// Commands queued before the child connects are buffered and delivered on
+/// connect, so none are lost. Ends when the command sender is dropped (mirror
+/// stopped/reaped) or the socket breaks.
+fn spawn_control_io(
+    listener: TcpListener,
+    rx: mpsc::Receiver<String>,
+    recording: Arc<AtomicBool>,
+    muted: Arc<AtomicBool>,
+    ctx: Option<egui::Context>,
+    pid: u32,
+) {
     std::thread::spawn(move || {
         use std::io::Write;
         listener.set_nonblocking(true).ok();
@@ -271,13 +293,50 @@ fn spawn_control_writer(listener: TcpListener, rx: mpsc::Receiver<String>, pid: 
                 return;
             }
         };
+
+        // Status reader: mirror -> dashboard (recording/mute), on a clone so it
+        // can read while this thread writes.
+        if let Ok(rs) = stream.try_clone() {
+            std::thread::spawn(move || {
+                use std::io::BufRead;
+                let mut r = std::io::BufReader::new(rs);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match r.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            let parts: Vec<&str> = line.split_whitespace().collect();
+                            let changed = match parts.as_slice() {
+                                ["rec", v] => {
+                                    recording.store(*v == "1", Ordering::Relaxed);
+                                    true
+                                }
+                                ["mute", v] => {
+                                    muted.store(*v == "1", Ordering::Relaxed);
+                                    true
+                                }
+                                _ => false,
+                            };
+                            if changed {
+                                crate::debug_log("dash", &format!("status: {} pid={pid}", line.trim()));
+                                if let Some(c) = &ctx {
+                                    c.request_repaint();
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Command writer: dashboard -> mirror.
         for cmd in rx {
             let line = format!("{cmd}\n");
             if stream.write_all(line.as_bytes()).and_then(|_| stream.flush()).is_err() {
                 crate::debug_log("dash", &format!("control: write failed pid={pid}"));
                 break;
             }
-            crate::debug_log("dash", &format!("control: sent {cmd:?} pid={pid}"));
         }
         crate::debug_log("dash", &format!("control: writer ended pid={pid}"));
     });
@@ -285,6 +344,9 @@ fn spawn_control_writer(listener: TcpListener, rx: mpsc::Receiver<String>, pid: 
 
 impl eframe::App for Dashboard {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.egui_ctx.is_none() {
+            self.egui_ctx = Some(ctx.clone()); // for repaint on async mirror status
+        }
         if self.last_refresh.elapsed() > Duration::from_secs(2) {
             self.refresh();
             self.last_refresh = Instant::now();
@@ -430,10 +492,13 @@ impl eframe::App for Dashboard {
                                                 format!("Snapshot failed · {} not reachable", d.model)
                                             };
                                         }
+                                        // Label reflects the mirror's reported
+                                        // state (updated via the status channel),
+                                        // so it stays right even for Ctrl+R toggles.
                                         let rec = self
                                             .running
                                             .get(&d.serial)
-                                            .map(|p| p.recording)
+                                            .map(|p| p.recording.load(Ordering::Relaxed))
                                             .unwrap_or(false);
                                         let (rlabel, rfill, rtext) = if rec {
                                             ("Stop Rec", STOP, Color32::WHITE)
@@ -441,38 +506,34 @@ impl eframe::App for Dashboard {
                                             ("Record", SURFACE2, TEXT)
                                         };
                                         if action_btn(ui, rlabel, rfill, rtext).clicked() {
-                                            let mut new_rec = None;
-                                            if let Some(p) = self.running.get_mut(&d.serial) {
-                                                if p.send("record") {
-                                                    p.recording = !p.recording;
-                                                    new_rec = Some(p.recording);
-                                                }
-                                            }
-                                            self.status = match new_rec {
-                                                Some(true) => format!("Recording · {}", d.model),
-                                                Some(false) => format!("Saved recording · {}", d.model),
-                                                None => format!("Record failed · {} not reachable", d.model),
+                                            let ok = self
+                                                .running
+                                                .get(&d.serial)
+                                                .map(|p| p.send("record"))
+                                                .unwrap_or(false);
+                                            self.status = if ok {
+                                                format!("{} · {}", if rec { "Stopping recording" } else { "Recording" }, d.model)
+                                            } else {
+                                                format!("Record failed · {} not reachable", d.model)
                                             };
                                         }
                                         if audio_on {
                                             let muted = self
                                                 .running
                                                 .get(&d.serial)
-                                                .map(|p| p.muted)
+                                                .map(|p| p.muted.load(Ordering::Relaxed))
                                                 .unwrap_or(false);
                                             let mlabel = if muted { "Unmute" } else { "Mute" };
                                             if action_btn(ui, mlabel, SURFACE2, TEXT).clicked() {
-                                                let mut new_mute = None;
-                                                if let Some(p) = self.running.get_mut(&d.serial) {
-                                                    if p.send("mute") {
-                                                        p.muted = !p.muted;
-                                                        new_mute = Some(p.muted);
-                                                    }
-                                                }
-                                                self.status = match new_mute {
-                                                    Some(true) => format!("Muted · {}", d.model),
-                                                    Some(false) => format!("Unmuted · {}", d.model),
-                                                    None => format!("Mute failed · {} not reachable", d.model),
+                                                let ok = self
+                                                    .running
+                                                    .get(&d.serial)
+                                                    .map(|p| p.send("mute"))
+                                                    .unwrap_or(false);
+                                                self.status = if ok {
+                                                    format!("{} · {}", if muted { "Unmuting" } else { "Muting" }, d.model)
+                                                } else {
+                                                    format!("Mute failed · {} not reachable", d.model)
                                                 };
                                             }
                                         }

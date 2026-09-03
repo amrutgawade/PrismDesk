@@ -229,15 +229,21 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
     let rec_audio: std::sync::Arc<std::sync::Mutex<Vec<u8>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new())); // PCM tap for recording
 
-    // Dashboard -> mirror command channel: the control-plane UI writes newline
-    // commands to our stdin so Snapshot/Record/Mute/Stop work without the mirror
-    // window having focus. Standalone (terminal) runs simply see no commands.
+    // Dashboard <-> mirror control channel. Commands come in; recording/mute
+    // status goes back out over the same socket so the dashboard's buttons
+    // reflect the true state (including in-window Ctrl+R/M toggles). Standalone
+    // (terminal) runs use stdin for commands and simply report nowhere.
     let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+    // Write handle for mirror -> dashboard status, shared with the main loop and
+    // populated once the control socket connects.
+    let status_writer: std::sync::Arc<std::sync::Mutex<Option<std::net::TcpStream>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
     if let Some(port) = cfg.ctrl_port {
         // Preferred: a localhost TCP control channel opened by the dashboard.
         // Reliable, ordered delivery — unlike a GUI-spawned child's stdin, which
         // dropped commands in practice. We dial back to the dashboard's listener.
         let tx = cmd_tx.clone();
+        let sw = status_writer.clone();
         std::thread::spawn(move || {
             use std::io::BufRead;
             debug_log("mirror", &format!("control: connecting to 127.0.0.1:{port}"));
@@ -251,6 +257,13 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
                     return;
                 }
             };
+            // A second handle on the same socket lets the main loop write status
+            // while this thread reads commands (TCP is full-duplex).
+            if let Ok(w) = stream.try_clone() {
+                if let Ok(mut g) = sw.lock() {
+                    *g = Some(w);
+                }
+            }
             let mut reader = std::io::BufReader::new(stream);
             let mut line = String::new();
             loop {
@@ -262,14 +275,10 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
                     }
                     Ok(_) => {
                         for tok in line.split_whitespace() {
-                            match parse_cmd(tok) {
-                                Some(cmd) => {
-                                    debug_log("mirror", &format!("control: cmd {:?}", tok));
-                                    if tx.send(cmd).is_err() {
-                                        return;
-                                    }
+                            if let Some(cmd) = parse_cmd(tok) {
+                                if tx.send(cmd).is_err() {
+                                    return;
                                 }
-                                None => debug_log("mirror", &format!("control: unknown {:?}", tok)),
                             }
                         }
                     }
@@ -302,6 +311,20 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
             }
         });
     }
+
+    // Report a status line back to the dashboard (best-effort; no-op standalone).
+    let report = {
+        let sw = status_writer.clone();
+        move |msg: &str| {
+            if let Ok(mut g) = sw.lock() {
+                if let Some(w) = g.as_mut() {
+                    use std::io::Write;
+                    let _ = w.write_all(msg.as_bytes());
+                    let _ = w.flush();
+                }
+            }
+        }
+    };
 
     'session: loop {
         // Bring up a session; on failure (device unplugged/sleeping) retry with
@@ -421,46 +444,27 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
             let mut c_paste = false;
             loop {
                 match cmd_rx.try_recv() {
-                    Ok(Cmd::Shot) => {
-                        debug_log("mirror", "drain: Shot");
-                        c_shot = true;
-                    }
-                    Ok(Cmd::Rec) => {
-                        debug_log("mirror", "drain: Rec");
-                        c_rec = true;
-                    }
-                    Ok(Cmd::Mute) => {
-                        debug_log("mirror", "drain: Mute");
-                        c_mute = true;
-                    }
+                    Ok(Cmd::Shot) => c_shot = true,
+                    Ok(Cmd::Rec) => c_rec = true,
+                    Ok(Cmd::Mute) => c_mute = true,
                     Ok(Cmd::Paste) => c_paste = true,
-                    Ok(Cmd::Stop) => {
-                        debug_log("mirror", "drain: Stop");
-                        break 'stream true;
-                    }
+                    Ok(Cmd::Stop) => break 'stream true,
                     Err(_) => break,
                 }
             }
             if mirror.mute_toggled() || c_mute {
                 if let Some(sk) = &sink {
-                    println!("[audio] {}", if sk.toggle_mute() { "muted" } else { "unmuted" });
+                    let muted = sk.toggle_mute();
+                    println!("[audio] {}", if muted { "muted" } else { "unmuted" });
+                    report(if muted { "mute 1\n" } else { "mute 0\n" });
                 }
             }
             if mirror.shot_requested() || c_shot {
                 let path = screenshot_path(&tag);
                 match mirror.screenshot(&path) {
-                    Ok(true) => {
-                        println!("[shot] saved {path}");
-                        debug_log("mirror", &format!("shot saved: {path}"));
-                    }
-                    Ok(false) => {
-                        eprintln!("[shot] no frame yet");
-                        debug_log("mirror", "shot: no frame yet");
-                    }
-                    Err(e) => {
-                        eprintln!("[shot] {e:?}");
-                        debug_log("mirror", &format!("shot error: {e:?}"));
-                    }
+                    Ok(true) => println!("[shot] saved {path}"),
+                    Ok(false) => eprintln!("[shot] no frame yet"),
+                    Err(e) => eprintln!("[shot] {e:?}"),
                 }
             }
             if mirror.rec_toggled() || c_rec {
@@ -469,6 +473,7 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
                         Some((p, n)) => println!("[rec] saved {p} ({n} frames)"),
                         None => eprintln!("[rec] nothing recorded"),
                     }
+                    report("rec 0\n");
                 } else {
                     let (w, h) = mirror.video_size();
                     if let (Some(cfg), true) = (&gop_config, w > 0 && h > 0 && !gop.is_empty()) {
@@ -479,6 +484,7 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
                         }
                         recorder = Some(r);
                         println!("[rec] recording... press Ctrl+R to stop");
+                        report("rec 1\n");
                     } else {
                         eprintln!("[rec] no keyframe buffered yet, try again in a moment");
                     }
@@ -633,7 +639,7 @@ fn pump_for(mirror: &mut Mirror, dur: Duration, cmd_rx: &std::sync::mpsc::Receiv
             if let Cmd::Stop = c {
                 return true;
             }
-            debug_log("mirror", "pump_for: dropping non-stop cmd while disconnected");
+            // Other commands can't act while disconnected — drop them.
         }
         std::thread::sleep(Duration::from_millis(15));
     }
