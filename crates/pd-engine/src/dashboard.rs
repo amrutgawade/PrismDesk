@@ -279,6 +279,11 @@ impl eframe::App for Dashboard {
                 }
 
                 for d in &devices {
+                    // Scope every widget in this card by the device serial so
+                    // identical buttons/combos across cards get unique egui ids
+                    // (otherwise multiple devices' controls collide and clicks
+                    // land on the wrong — or no — device).
+                    ui.push_id(&d.serial, |ui| {
                     egui::Frame::default()
                         .fill(SURFACE)
                         .rounding(Rounding::same(10.0))
@@ -340,10 +345,16 @@ impl eframe::App for Dashboard {
                                         .unwrap_or(true);
                                     ui.horizontal(|ui| {
                                         if action_btn(ui, "Snapshot", SURFACE2, TEXT).clicked() {
-                                            if let Some(p) = self.running.get_mut(&d.serial) {
-                                                p.send("snapshot");
-                                            }
-                                            self.status = format!("Snapshot · {}", d.model);
+                                            let ok = self
+                                                .running
+                                                .get_mut(&d.serial)
+                                                .map(|p| p.send("snapshot"))
+                                                .unwrap_or(false);
+                                            self.status = if ok {
+                                                format!("Snapshot · {}", d.model)
+                                            } else {
+                                                format!("Snapshot failed · {} not reachable", d.model)
+                                            };
                                         }
                                         let rec = self
                                             .running
@@ -356,10 +367,18 @@ impl eframe::App for Dashboard {
                                             ("Record", SURFACE2, TEXT)
                                         };
                                         if action_btn(ui, rlabel, rfill, rtext).clicked() {
+                                            let mut new_rec = None;
                                             if let Some(p) = self.running.get_mut(&d.serial) {
-                                                p.send("record");
-                                                p.recording = !p.recording;
+                                                if p.send("record") {
+                                                    p.recording = !p.recording;
+                                                    new_rec = Some(p.recording);
+                                                }
                                             }
+                                            self.status = match new_rec {
+                                                Some(true) => format!("Recording · {}", d.model),
+                                                Some(false) => format!("Saved recording · {}", d.model),
+                                                None => format!("Record failed · {} not reachable", d.model),
+                                            };
                                         }
                                         if audio_on {
                                             let muted = self
@@ -369,10 +388,18 @@ impl eframe::App for Dashboard {
                                                 .unwrap_or(false);
                                             let mlabel = if muted { "Unmute" } else { "Mute" };
                                             if action_btn(ui, mlabel, SURFACE2, TEXT).clicked() {
+                                                let mut new_mute = None;
                                                 if let Some(p) = self.running.get_mut(&d.serial) {
-                                                    p.send("mute");
-                                                    p.muted = !p.muted;
+                                                    if p.send("mute") {
+                                                        p.muted = !p.muted;
+                                                        new_mute = Some(p.muted);
+                                                    }
                                                 }
+                                                self.status = match new_mute {
+                                                    Some(true) => format!("Muted · {}", d.model),
+                                                    Some(false) => format!("Unmuted · {}", d.model),
+                                                    None => format!("Mute failed · {} not reachable", d.model),
+                                                };
                                             }
                                         }
                                     });
@@ -394,6 +421,7 @@ impl eframe::App for Dashboard {
                                 }
                             }
                         });
+                    });
                     ui.add_space(8.0);
                 }
 

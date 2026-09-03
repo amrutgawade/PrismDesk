@@ -174,6 +174,9 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
         }
     };
     let want_audio = cfg.audio && sink.is_some();
+    // Short per-device tag so multi-device snapshots/recordings never collide
+    // and each file says which device it came from.
+    let tag = device_tag(cfg.serial.as_deref());
 
     let mut backoff = Duration::from_millis(200);
     let cap = Duration::from_secs(5);
@@ -344,7 +347,7 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
                 }
             }
             if mirror.shot_requested() || c_shot {
-                let path = screenshot_path();
+                let path = screenshot_path(&tag);
                 match mirror.screenshot(&path) {
                     Ok(true) => println!("[shot] saved {path}"),
                     Ok(false) => eprintln!("[shot] no frame yet"),
@@ -360,7 +363,7 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
                 } else {
                     let (w, h) = mirror.video_size();
                     if let (Some(cfg), true) = (&gop_config, w > 0 && h > 0 && !gop.is_empty()) {
-                        let mut r = record::Recorder::new(rec_path(), w as u16, h as u16);
+                        let mut r = record::Recorder::new(rec_path(&tag), w as u16, h as u16);
                         r.feed(cfg, 0, true, true); // SPS/PPS
                         for (d, pts, key) in &gop {
                             r.feed(d, *pts, *key, false); // replay current GOP (starts at keyframe)
@@ -594,7 +597,22 @@ fn blank_demo() -> windows_core::Result<()> {
     Ok(())
 }
 
-fn rec_path() -> String {
+/// A short, filesystem-safe device tag from the adb serial (e.g. for filenames).
+fn device_tag(serial: Option<&str>) -> String {
+    match serial {
+        Some(s) => {
+            let clean: String = s.chars().filter(|c| c.is_ascii_alphanumeric()).take(12).collect();
+            if clean.is_empty() {
+                "dev".into()
+            } else {
+                clean
+            }
+        }
+        None => "dev".into(),
+    }
+}
+
+fn rec_path(tag: &str) -> String {
     let base = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
     let dir = format!("{base}\\Videos\\PrismDesk");
     let _ = std::fs::create_dir_all(&dir);
@@ -602,10 +620,10 @@ fn rec_path() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    format!("{dir}\\prismdesk-{ms}.mp4")
+    format!("{dir}\\prismdesk-{tag}-{ms}.mp4")
 }
 
-fn screenshot_path() -> String {
+fn screenshot_path(tag: &str) -> String {
     let base = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
     let dir = format!("{base}\\Pictures\\PrismDesk");
     let _ = std::fs::create_dir_all(&dir);
@@ -613,7 +631,7 @@ fn screenshot_path() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    format!("{dir}\\prismdesk-{ms}.png")
+    format!("{dir}\\prismdesk-{tag}-{ms}.png")
 }
 
 fn find_capture() -> String {
