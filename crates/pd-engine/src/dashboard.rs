@@ -8,6 +8,17 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use egui::{Color32, RichText, Rounding};
+
+// Dark graphite + a restrained "prism" accent (violet CTA, cyan highlight).
+const BG: Color32 = Color32::from_rgb(0x0e, 0x10, 0x14);
+const SURFACE: Color32 = Color32::from_rgb(0x17, 0x1a, 0x20);
+const SURFACE2: Color32 = Color32::from_rgb(0x20, 0x25, 0x2e);
+const TEXT: Color32 = Color32::from_rgb(0xe8, 0xeb, 0xf0);
+const DIM: Color32 = Color32::from_rgb(0x8a, 0x93, 0xa2);
+const ACCENT: Color32 = Color32::from_rgb(0x8b, 0x5c, 0xf6);
+const CYAN: Color32 = Color32::from_rgb(0x34, 0xe0, 0xd4);
+const WARN: Color32 = Color32::from_rgb(0xd9, 0xa2, 0x1b);
 
 fn adb_path() -> PathBuf {
     let bundled = Path::new(r"C:\platform-tools\adb.exe");
@@ -38,8 +49,55 @@ pub fn run() -> eframe::Result<()> {
     eframe::run_native(
         "PrismDesk",
         options,
-        Box::new(|_cc| Ok(Box::new(Dashboard::new()))),
+        Box::new(|cc| {
+            setup_style(&cc.egui_ctx);
+            Ok(Box::new(Dashboard::new()))
+        }),
     )
+}
+
+fn setup_style(ctx: &egui::Context) {
+    use egui::{FontId, Stroke, Visuals};
+    let mut v = Visuals::dark();
+    v.panel_fill = BG;
+    v.window_fill = BG;
+    v.extreme_bg_color = Color32::from_rgb(0x0a, 0x0c, 0x0f);
+    v.override_text_color = Some(TEXT);
+    v.selection.bg_fill = ACCENT.linear_multiply(0.45);
+    v.selection.stroke = Stroke::new(1.0, ACCENT);
+    v.hyperlink_color = CYAN;
+    let r = Rounding::same(8.0);
+    for w in [
+        &mut v.widgets.noninteractive,
+        &mut v.widgets.inactive,
+        &mut v.widgets.hovered,
+        &mut v.widgets.active,
+        &mut v.widgets.open,
+    ] {
+        w.rounding = r;
+    }
+    v.widgets.noninteractive.bg_fill = SURFACE;
+    v.widgets.inactive.bg_fill = SURFACE2;
+    v.widgets.inactive.weak_bg_fill = SURFACE2;
+    v.widgets.hovered.bg_fill = SURFACE2;
+    v.widgets.active.bg_fill = ACCENT;
+    v.window_rounding = Rounding::same(10.0);
+    ctx.set_visuals(v);
+
+    let mut style = (*ctx.style()).clone();
+    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+    style.spacing.button_padding = egui::vec2(12.0, 8.0);
+    use egui::FontFamily::{Monospace, Proportional};
+    use egui::TextStyle::{Body, Button, Heading, Monospace as MonoStyle, Small};
+    style.text_styles = [
+        (Heading, FontId::new(26.0, Proportional)),
+        (Body, FontId::new(15.0, Proportional)),
+        (Button, FontId::new(15.0, Proportional)),
+        (Small, FontId::new(12.0, Proportional)),
+        (MonoStyle, FontId::new(13.0, Monospace)),
+    ]
+    .into();
+    ctx.set_style(style);
 }
 
 struct Dashboard {
@@ -79,7 +137,7 @@ impl Dashboard {
             cmd.arg("--no-audio");
         }
         match cmd.spawn() {
-            Ok(_) => self.status = format!("Started mirror for {serial}"),
+            Ok(_) => self.status = format!("Started mirror · {serial}"),
             Err(e) => self.status = format!("Failed to start: {e}"),
         }
     }
@@ -93,61 +151,131 @@ impl eframe::App for Dashboard {
         }
         ctx.request_repaint_after(Duration::from_secs(1));
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(6.0);
-            ui.heading("PrismDesk");
-            ui.label("Android screen mirroring");
-            ui.separator();
+        egui::CentralPanel::default()
+            .frame(egui::Frame::default().fill(BG).inner_margin(egui::Margin::same(18.0)))
+            .show(ctx, |ui| {
+                // Header / wordmark
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("◆").size(20.0).color(CYAN));
+                    ui.add_space(2.0);
+                    ui.label(RichText::new("Prism").size(26.0).strong().color(ACCENT));
+                    ui.add_space(-4.0);
+                    ui.label(RichText::new("Desk").size(26.0).strong().color(TEXT));
+                });
+                ui.label(RichText::new("Android screen mirroring").color(DIM));
+                accent_rule(ui);
+                ui.add_space(10.0);
 
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label("Quality:");
-                egui::ComboBox::from_id_salt("preset")
-                    .selected_text(PRESETS[self.preset])
-                    .show_ui(ui, |ui| {
-                        for (i, p) in PRESETS.iter().enumerate() {
-                            ui.selectable_value(&mut self.preset, i, *p);
-                        }
-                    });
-                ui.checkbox(&mut self.audio, "Audio");
-            });
-
-            ui.add_space(10.0);
-            ui.label("Devices");
-            ui.add_space(4.0);
-
-            if self.devices.is_empty() {
-                ui.weak("No device found. Connect via USB with debugging enabled.");
-            }
-
-            let devices = self.devices.clone();
-            for d in &devices {
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.strong(&d.model);
-                            ui.weak(&d.serial);
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if d.authorized {
-                                if ui.button("Start Mirror").clicked() {
-                                    self.start_mirror(&d.serial);
-                                }
-                            } else {
-                                ui.weak("unauthorized");
+                // Quality settings
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Quality").color(DIM));
+                    egui::ComboBox::from_id_salt("preset")
+                        .selected_text(PRESETS[self.preset])
+                        .show_ui(ui, |ui| {
+                            for (i, p) in PRESETS.iter().enumerate() {
+                                ui.selectable_value(&mut self.preset, i, *p);
                             }
                         });
-                    });
+                    ui.add_space(8.0);
+                    ui.checkbox(&mut self.audio, RichText::new("Audio").color(TEXT));
                 });
-            }
 
-            if !self.status.is_empty() {
-                ui.add_space(8.0);
-                ui.separator();
-                ui.weak(&self.status);
-            }
-        });
+                ui.add_space(14.0);
+                ui.label(RichText::new("DEVICES").small().color(DIM).strong());
+                ui.add_space(6.0);
+
+                let devices = self.devices.clone();
+                if devices.is_empty() {
+                    egui::Frame::default()
+                        .fill(SURFACE)
+                        .rounding(Rounding::same(10.0))
+                        .inner_margin(egui::Margin::same(16.0))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new("No device found").color(TEXT).strong());
+                            ui.label(
+                                RichText::new("Connect a phone via USB with debugging enabled.")
+                                    .small()
+                                    .color(DIM),
+                            );
+                        });
+                }
+
+                for d in &devices {
+                    egui::Frame::default()
+                        .fill(SURFACE)
+                        .rounding(Rounding::same(10.0))
+                        .inner_margin(egui::Margin::same(14.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new(&d.model).size(16.0).strong().color(TEXT));
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(" USB ")
+                                                .small()
+                                                .color(BG)
+                                                .background_color(CYAN),
+                                        );
+                                        ui.label(RichText::new(&d.serial).small().color(DIM));
+                                    });
+                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if d.authorized {
+                                            let btn = egui::Button::new(
+                                                RichText::new("Start Mirror")
+                                                    .color(Color32::WHITE)
+                                                    .strong(),
+                                            )
+                                            .fill(ACCENT)
+                                            .rounding(Rounding::same(8.0))
+                                            .min_size(egui::vec2(112.0, 34.0));
+                                            if ui.add(btn).clicked() {
+                                                self.start_mirror(&d.serial);
+                                            }
+                                        } else {
+                                            ui.label(RichText::new("unauthorized").color(WARN));
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                    ui.add_space(8.0);
+                }
+
+                if !self.status.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(&self.status).small().color(CYAN));
+                }
+            });
     }
+}
+
+/// A thin cyan→violet accent divider.
+fn accent_rule(ui: &mut egui::Ui) {
+    ui.add_space(10.0);
+    let w = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 2.0), egui::Sense::hover());
+    let painter = ui.painter();
+    let steps = 48;
+    for i in 0..steps {
+        let t0 = i as f32 / steps as f32;
+        let t1 = (i + 1) as f32 / steps as f32;
+        let col = lerp_color(CYAN, ACCENT, (t0 + t1) * 0.5);
+        let x0 = rect.left() + rect.width() * t0;
+        let x1 = rect.left() + rect.width() * t1;
+        painter.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(x0, rect.top()), egui::pos2(x1, rect.bottom())),
+            0.0,
+            col,
+        );
+    }
+}
+
+fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t) as u8;
+    Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
 }
 
 fn list_devices() -> Vec<Device> {

@@ -15,7 +15,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SCRCPY_VERSION: &str = "3.3.1";
 const DEVICE_JAR: &str = "/data/local/tmp/scrcpy-server.jar";
-const LOCAL_PORT: u16 = 27184;
 
 /// One decoded-stream access unit off the wire.
 pub struct Au {
@@ -44,8 +43,16 @@ fn server_jar() -> PathBuf {
     PathBuf::from("assets/server/scrcpy-server-v3.3.1.jar")
 }
 
-fn adb(args: &[&str]) -> io::Result<std::process::Output> {
-    Command::new(adb_path()).args(args).output()
+fn adb_cmd(serial: &Option<String>) -> Command {
+    let mut c = Command::new(adb_path());
+    if let Some(s) = serial {
+        c.arg("-s").arg(s);
+    }
+    c
+}
+
+fn adb_run(serial: &Option<String>, args: &[&str]) -> io::Result<std::process::Output> {
+    adb_cmd(serial).args(args).output()
 }
 
 fn scid() -> String {
@@ -65,35 +72,41 @@ pub fn start(
     codec: &str,
     audio_on: bool,
     control_on: bool,
+    serial: Option<String>,
 ) -> Result<(Session, TcpStream, Option<TcpStream>, Option<TcpStream>), String> {
     let jar = server_jar();
     if !jar.exists() {
         return Err(format!("pinned server jar not found at {}", jar.display()));
     }
 
-    let devices = adb(&["devices"]).map_err(|e| format!("adb: {e}"))?;
-    let list = String::from_utf8_lossy(&devices.stdout);
-    if !list.lines().skip(1).any(|l| l.trim_end().ends_with("\tdevice")) {
-        return Err("no authorized device (USB debugging on + RSA accepted)".into());
+    // Confirm the target device is present + authorized (-s targets it).
+    let state = adb_run(&serial, &["get-state"]).map_err(|e| format!("adb: {e}"))?;
+    if String::from_utf8_lossy(&state.stdout).trim() != "device" {
+        return Err("device not authorized (USB debugging on + RSA accepted)".into());
     }
 
-    let push = adb(&["push", jar.to_str().unwrap(), DEVICE_JAR]).map_err(|e| format!("push: {e}"))?;
+    let push = adb_run(&serial, &["push", jar.to_str().unwrap(), DEVICE_JAR])
+        .map_err(|e| format!("push: {e}"))?;
     if !push.status.success() {
         return Err(format!("adb push failed: {}", String::from_utf8_lossy(&push.stderr)));
     }
 
-    let listener =
-        TcpListener::bind(("127.0.0.1", LOCAL_PORT)).map_err(|e| format!("bind: {e}"))?;
+    // Ephemeral local port so multiple mirrors can run at once.
+    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("bind: {e}"))?;
+    let port = listener.local_addr().map_err(|e| format!("addr: {e}"))?.port();
     listener.set_nonblocking(true).ok();
 
     let scid = scid();
     let sock_name = format!("localabstract:scrcpy_{scid}");
-    let rev = adb(&["reverse", &sock_name, &format!("tcp:{LOCAL_PORT}")])
+    let rev = adb_run(&serial, &["reverse", &sock_name, &format!("tcp:{port}")])
         .map_err(|e| format!("reverse: {e}"))?;
     if !rev.status.success() {
         return Err(format!("adb reverse failed: {}", String::from_utf8_lossy(&rev.stderr)));
     }
-    let reverse_guard = ReverseGuard { remote: sock_name };
+    let reverse_guard = ReverseGuard {
+        remote: sock_name,
+        serial: serial.clone(),
+    };
 
     let classpath = format!("CLASSPATH={DEVICE_JAR}");
     let args = [
@@ -120,7 +133,7 @@ pub fn start(
         "send_frame_meta=true", // 12-byte header per AU: PTS + config/key flags + len
         "send_dummy_byte=false",
     ];
-    let mut child = Command::new(adb_path())
+    let mut child = adb_cmd(&serial)
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -204,10 +217,11 @@ fn accept(listener: &TcpListener, budget: Duration) -> Option<TcpStream> {
 
 struct ReverseGuard {
     remote: String,
+    serial: Option<String>,
 }
 impl Drop for ReverseGuard {
     fn drop(&mut self) {
-        let _ = adb(&["reverse", "--remove", &self.remote]);
+        let _ = adb_run(&self.serial, &["reverse", "--remove", &self.remote]);
     }
 }
 

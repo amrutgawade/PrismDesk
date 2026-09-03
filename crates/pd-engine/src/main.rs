@@ -28,11 +28,19 @@ struct Config {
     fps: u32,
     codec: String,
     audio: bool,
+    serial: Option<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { max_size: 1600, bitrate: 20_000_000, fps: 60, codec: "h264".into(), audio: true }
+        Self {
+            max_size: 1600,
+            bitrate: 20_000_000,
+            fps: 60,
+            codec: "h264".into(),
+            audio: true,
+            serial: None,
+        }
     }
 }
 
@@ -62,6 +70,7 @@ fn parse_config(args: &[String]) -> Config {
                     fps: 60,
                     codec: "h265".into(),
                     audio: c.audio,
+                    serial: c.serial.clone(),
                 }
             }
             "lowlatency" | "low" => {
@@ -71,6 +80,7 @@ fn parse_config(args: &[String]) -> Config {
                     fps: 90,
                     codec: "h264".into(),
                     audio: c.audio,
+                    serial: c.serial.clone(),
                 }
             }
             _ => {} // "balanced" == defaults
@@ -87,6 +97,9 @@ fn parse_config(args: &[String]) -> Config {
     }
     if let Some(v) = flag_value(args, "--codec") {
         c.codec = v;
+    }
+    if let Some(v) = flag_value(args, "--serial") {
+        c.serial = Some(v);
     }
     if args.iter().any(|a| a == "--no-audio") {
         c.audio = false;
@@ -146,6 +159,7 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
             &cfg.codec,
             want_audio,
             true, // control (mouse) on
+            cfg.serial.clone(),
         ) {
             Ok(s) => {
                 backoff = Duration::from_millis(200);
