@@ -30,6 +30,7 @@ struct Config {
     audio: bool,
     input: bool,
     serial: Option<String>,
+    ctrl_port: Option<u16>,
 }
 
 impl Default for Config {
@@ -42,6 +43,7 @@ impl Default for Config {
             audio: true,
             input: true,
             serial: None,
+            ctrl_port: None,
         }
     }
 }
@@ -62,6 +64,28 @@ fn main() {
         }
         eprintln!("[error] {e}");
         std::process::exit(1);
+    }
+}
+
+/// Append a diagnostic line to %TEMP%\prismdesk-debug.log (best-effort). Used to
+/// trace the dashboard->mirror command pipeline across both processes. Enabled
+/// whenever PRISMDESK_DEBUG is set; the dashboard sets it for its children.
+pub(crate) fn debug_log(role: &str, msg: &str) {
+    if std::env::var_os("PRISMDESK_DEBUG").is_none() {
+        return;
+    }
+    use std::io::Write;
+    let dir = std::env::var("TEMP").unwrap_or_else(|_| ".".into());
+    let pid = std::process::id();
+    // Per-process file so concurrent dashboard/mirror writes never corrupt each
+    // other (a single shared file interleaves at the byte level).
+    let path = format!("{dir}\\prismdesk-{role}-{pid}.log");
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{ms} {msg}");
     }
 }
 
@@ -93,6 +117,7 @@ fn parse_config(args: &[String]) -> Config {
                     audio: c.audio,
                     input: c.input,
                     serial: c.serial.clone(),
+                    ctrl_port: c.ctrl_port,
                 }
             }
             "lowlatency" | "low" => {
@@ -104,6 +129,7 @@ fn parse_config(args: &[String]) -> Config {
                     audio: c.audio,
                     input: c.input,
                     serial: c.serial.clone(),
+                    ctrl_port: c.ctrl_port,
                 }
             }
             _ => {} // "balanced" == defaults
@@ -124,6 +150,9 @@ fn parse_config(args: &[String]) -> Config {
     if let Some(v) = flag_value(args, "--serial") {
         c.serial = Some(v);
     }
+    if let Some(v) = flag_value(args, "--ctrl-port").and_then(|s| s.parse::<u16>().ok()) {
+        c.ctrl_port = Some(v);
+    }
     if args.iter().any(|a| a == "--no-audio") {
         c.audio = false;
     }
@@ -137,14 +166,25 @@ fn flag_value(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
 }
 
-/// A command from the dashboard (control plane), delivered on the mirror's
-/// stdin so record/snapshot/mute/stop work without focusing the mirror window.
+/// A command from the dashboard (control plane) so record/snapshot/mute/stop
+/// work without focusing the mirror window.
 enum Cmd {
     Shot,
     Rec,
     Mute,
     Paste,
     Stop,
+}
+
+fn parse_cmd(tok: &str) -> Option<Cmd> {
+    Some(match tok {
+        "snapshot" | "shot" => Cmd::Shot,
+        "record" | "rec" => Cmd::Rec,
+        "mute" => Cmd::Mute,
+        "paste" => Cmd::Paste,
+        "stop" | "quit" => Cmd::Stop,
+        _ => return None,
+    })
 }
 
 /// Phase 1d — live mirror. Bring up the reverse-tunnel video session, read
@@ -193,27 +233,75 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
     // commands to our stdin so Snapshot/Record/Mute/Stop work without the mirror
     // window having focus. Standalone (terminal) runs simply see no commands.
     let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
-    std::thread::spawn(move || {
-        use std::io::BufRead;
-        let stdin = std::io::stdin();
-        for line in stdin.lock().lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => break,
+    if let Some(port) = cfg.ctrl_port {
+        // Preferred: a localhost TCP control channel opened by the dashboard.
+        // Reliable, ordered delivery — unlike a GUI-spawned child's stdin, which
+        // dropped commands in practice. We dial back to the dashboard's listener.
+        let tx = cmd_tx.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            debug_log("mirror", &format!("control: connecting to 127.0.0.1:{port}"));
+            let stream = match std::net::TcpStream::connect(("127.0.0.1", port)) {
+                Ok(s) => {
+                    debug_log("mirror", "control: connected");
+                    s
+                }
+                Err(e) => {
+                    debug_log("mirror", &format!("control: connect failed: {e}"));
+                    return;
+                }
             };
-            let cmd = match line.trim() {
-                "snapshot" | "shot" => Cmd::Shot,
-                "record" | "rec" => Cmd::Rec,
-                "mute" => Cmd::Mute,
-                "paste" => Cmd::Paste,
-                "stop" | "quit" => Cmd::Stop,
-                _ => continue,
-            };
-            if cmd_tx.send(cmd).is_err() {
-                break;
+            let mut reader = std::io::BufReader::new(stream);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => {
+                        debug_log("mirror", "control: EOF");
+                        break;
+                    }
+                    Ok(_) => {
+                        for tok in line.split_whitespace() {
+                            match parse_cmd(tok) {
+                                Some(cmd) => {
+                                    debug_log("mirror", &format!("control: cmd {:?}", tok));
+                                    if tx.send(cmd).is_err() {
+                                        return;
+                                    }
+                                }
+                                None => debug_log("mirror", &format!("control: unknown {:?}", tok)),
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        debug_log("mirror", &format!("control: read error: {e}"));
+                        break;
+                    }
+                }
             }
-        }
-    });
+        });
+    } else {
+        // Fallback for standalone/manual runs: newline commands on stdin.
+        let tx = cmd_tx.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            debug_log("mirror", "stdin reader thread started");
+            let stdin = std::io::stdin();
+            for line in stdin.lock().lines() {
+                let line = match line {
+                    Ok(l) => l,
+                    Err(_) => break,
+                };
+                for tok in line.split_whitespace() {
+                    if let Some(cmd) = parse_cmd(tok) {
+                        if tx.send(cmd).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     'session: loop {
         // Bring up a session; on failure (device unplugged/sleeping) retry with
@@ -333,11 +421,23 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
             let mut c_paste = false;
             loop {
                 match cmd_rx.try_recv() {
-                    Ok(Cmd::Shot) => c_shot = true,
-                    Ok(Cmd::Rec) => c_rec = true,
-                    Ok(Cmd::Mute) => c_mute = true,
+                    Ok(Cmd::Shot) => {
+                        debug_log("mirror", "drain: Shot");
+                        c_shot = true;
+                    }
+                    Ok(Cmd::Rec) => {
+                        debug_log("mirror", "drain: Rec");
+                        c_rec = true;
+                    }
+                    Ok(Cmd::Mute) => {
+                        debug_log("mirror", "drain: Mute");
+                        c_mute = true;
+                    }
                     Ok(Cmd::Paste) => c_paste = true,
-                    Ok(Cmd::Stop) => break 'stream true,
+                    Ok(Cmd::Stop) => {
+                        debug_log("mirror", "drain: Stop");
+                        break 'stream true;
+                    }
                     Err(_) => break,
                 }
             }
@@ -349,9 +449,18 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
             if mirror.shot_requested() || c_shot {
                 let path = screenshot_path(&tag);
                 match mirror.screenshot(&path) {
-                    Ok(true) => println!("[shot] saved {path}"),
-                    Ok(false) => eprintln!("[shot] no frame yet"),
-                    Err(e) => eprintln!("[shot] {e:?}"),
+                    Ok(true) => {
+                        println!("[shot] saved {path}");
+                        debug_log("mirror", &format!("shot saved: {path}"));
+                    }
+                    Ok(false) => {
+                        eprintln!("[shot] no frame yet");
+                        debug_log("mirror", "shot: no frame yet");
+                    }
+                    Err(e) => {
+                        eprintln!("[shot] {e:?}");
+                        debug_log("mirror", &format!("shot error: {e:?}"));
+                    }
                 }
             }
             if mirror.rec_toggled() || c_rec {
@@ -524,6 +633,7 @@ fn pump_for(mirror: &mut Mirror, dur: Duration, cmd_rx: &std::sync::mpsc::Receiv
             if let Cmd::Stop = c {
                 return true;
             }
+            debug_log("mirror", "pump_for: dropping non-stop cmd while disconnected");
         }
         std::thread::sleep(Duration::from_millis(15));
     }

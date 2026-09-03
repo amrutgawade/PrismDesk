@@ -4,9 +4,10 @@
 //! isolated.
 
 use std::collections::HashMap;
-use std::io::Write;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -121,20 +122,23 @@ enum Tab {
     About,
 }
 
-/// A live mirror child process plus its command pipe and runtime toggles.
+/// A live mirror child process plus its control channel and runtime toggles.
+/// Commands are pushed to `tx`; a per-mirror writer thread forwards them over a
+/// localhost TCP socket to the child (reliable, ordered — unlike stdin, which
+/// dropped commands when the child was a busy GUI-spawned process).
 struct Proc {
     child: Child,
-    stdin: Option<ChildStdin>,
+    tx: mpsc::Sender<String>,
     recording: bool,
     muted: bool,
 }
 impl Proc {
-    /// Send one newline command to the mirror; returns false if the pipe is gone.
+    /// Queue a command for the mirror. Returns false only if the writer thread
+    /// (and thus the control channel) is gone.
     fn send(&mut self, cmd: &str) -> bool {
-        if let Some(si) = &mut self.stdin {
-            return writeln!(si, "{cmd}").and_then(|_| si.flush()).is_ok();
-        }
-        false
+        let ok = self.tx.send(cmd.to_string()).is_ok();
+        crate::debug_log("dash", &format!("queue {cmd:?} -> {ok}"));
+        ok
     }
 }
 
@@ -169,27 +173,52 @@ impl Dashboard {
     }
 
     fn start_mirror(&mut self, serial: &str) {
-        let s = self.settings.entry(serial.to_string()).or_default();
+        let preset = self.settings.entry(serial.to_string()).or_default();
+        let (audio, input, preset_idx) = (preset.audio, preset.input, preset.preset);
+
+        // Bind a localhost control listener BEFORE spawning; the child dials back
+        // to this port for its command channel.
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => l,
+            Err(e) => {
+                self.status = format!("Failed to open control port: {e}");
+                return;
+            }
+        };
+        let port = match listener.local_addr() {
+            Ok(a) => a.port(),
+            Err(e) => {
+                self.status = format!("Failed to read control port: {e}");
+                return;
+            }
+        };
+
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pd-engine"));
         let mut cmd = Command::new(exe);
         cmd.arg("--mirror")
             .arg("--serial")
             .arg(serial)
             .arg("--preset")
-            .arg(PRESETS[s.preset]);
-        if !s.audio {
+            .arg(PRESETS[preset_idx])
+            .arg("--ctrl-port")
+            .arg(port.to_string());
+        if !audio {
             cmd.arg("--no-audio");
         }
-        if !s.input {
+        if !input {
             cmd.arg("--no-control");
         }
-        cmd.stdin(Stdio::piped()); // command channel for Snapshot/Record/Mute/Stop
+        // Diagnostics are opt-in: if the dashboard was launched with
+        // PRISMDESK_DEBUG set, children inherit it and trace the control channel.
         match cmd.spawn() {
-            Ok(mut child) => {
-                let stdin = child.stdin.take();
+            Ok(child) => {
+                let pid = child.id();
+                let (tx, rx) = mpsc::channel::<String>();
+                spawn_control_writer(listener, rx, pid);
+                crate::debug_log("dash", &format!("spawned {serial} pid={pid} ctrl_port={port}"));
                 self.running.insert(
                     serial.to_string(),
-                    Proc { child, stdin, recording: false, muted: false },
+                    Proc { child, tx, recording: false, muted: false },
                 );
                 self.status = format!("Mirroring · {serial}");
             }
@@ -200,13 +229,58 @@ impl Dashboard {
     fn stop_mirror(&mut self, serial: &str) {
         if let Some(mut p) = self.running.remove(serial) {
             // Ask for a clean shutdown (flushes any active recording); if the
-            // pipe is already gone, fall back to killing the process.
+            // control channel is already gone, fall back to killing the process.
             if !p.send("stop") {
                 let _ = p.child.kill();
             }
             self.status = format!("Stopped · {serial}");
         }
     }
+}
+
+/// Accept one mirror's control connection (bounded wait) and forward queued
+/// commands to it as `cmd\n` lines. Commands queued before the child connects
+/// are buffered and delivered on connect, so none are lost. The thread ends when
+/// the command sender is dropped (mirror stopped/reaped) or the socket breaks.
+fn spawn_control_writer(listener: TcpListener, rx: mpsc::Receiver<String>, pid: u32) {
+    std::thread::spawn(move || {
+        use std::io::Write;
+        listener.set_nonblocking(true).ok();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut connected = None;
+        while Instant::now() < deadline {
+            match listener.accept() {
+                Ok((s, _)) => {
+                    connected = Some(s);
+                    break;
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(15));
+                }
+                Err(_) => break,
+            }
+        }
+        let mut stream = match connected {
+            Some(s) => {
+                s.set_nonblocking(false).ok();
+                crate::debug_log("dash", &format!("control: accepted mirror pid={pid}"));
+                s
+            }
+            None => {
+                crate::debug_log("dash", &format!("control: mirror pid={pid} never connected"));
+                return;
+            }
+        };
+        for cmd in rx {
+            let line = format!("{cmd}\n");
+            if stream.write_all(line.as_bytes()).and_then(|_| stream.flush()).is_err() {
+                crate::debug_log("dash", &format!("control: write failed pid={pid}"));
+                break;
+            }
+            crate::debug_log("dash", &format!("control: sent {cmd:?} pid={pid}"));
+        }
+        crate::debug_log("dash", &format!("control: writer ended pid={pid}"));
+    });
 }
 
 impl eframe::App for Dashboard {
