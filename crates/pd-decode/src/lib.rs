@@ -12,7 +12,7 @@ use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::sync::Once;
 
-use windows::core::{Interface, Result};
+use windows::core::{Interface, Result, GUID};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D, D3D11_TEXTURE2D_DESC};
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::CoTaskMemFree;
@@ -42,7 +42,13 @@ pub struct Decoder {
 
 impl Decoder {
     /// Create a decoder that decodes onto `device` (share the renderer's device).
-    pub fn new(device: &ID3D11Device) -> Result<Self> {
+    /// `codec` is "h264" (default) or "h265"/"hevc".
+    pub fn new(device: &ID3D11Device, codec: &str) -> Result<Self> {
+        let subtype = if codec.eq_ignore_ascii_case("h265") || codec.eq_ignore_ascii_case("hevc") {
+            MFVideoFormat_HEVC
+        } else {
+            MFVideoFormat_H264
+        };
         unsafe {
             MF_INIT.call_once(|| {
                 let _ = MFStartup(MF_VERSION, MFSTARTUP_LITE);
@@ -54,7 +60,7 @@ impl Decoder {
             let mgr = mgr.expect("null device manager");
             mgr.ResetDevice(device, token)?;
 
-            let transform = instantiate_h264_decoder()?;
+            let transform = instantiate_decoder(subtype)?;
 
             if let Ok(attrs) = transform.GetAttributes() {
                 let _ = attrs.SetUINT32(&MF_LOW_LATENCY, 1);
@@ -63,7 +69,7 @@ impl Decoder {
 
             let intype = MFCreateMediaType()?;
             intype.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-            intype.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
+            intype.SetGUID(&MF_MT_SUBTYPE, &subtype)?;
             transform.SetInputType(0, &intype, 0)?;
 
             let mut me = Self {
@@ -160,11 +166,11 @@ impl Decoder {
     }
 }
 
-fn instantiate_h264_decoder() -> Result<IMFTransform> {
+fn instantiate_decoder(subtype: GUID) -> Result<IMFTransform> {
     unsafe {
         let input = MFT_REGISTER_TYPE_INFO {
             guidMajorType: MFMediaType_Video,
-            guidSubtype: MFVideoFormat_H264,
+            guidSubtype: subtype,
         };
         let output = MFT_REGISTER_TYPE_INFO {
             guidMajorType: MFMediaType_Video,

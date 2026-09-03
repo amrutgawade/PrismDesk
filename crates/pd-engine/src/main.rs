@@ -46,15 +46,34 @@ impl Default for Config {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let r: Result<(), Box<dyn std::error::Error>> = match args.first().map(String::as_str) {
+    let mode = args.first().map(String::as_str);
+    let r: Result<(), Box<dyn std::error::Error>> = match mode {
         Some("--mirror") => live_mirror(parse_config(&args)).map_err(Into::into),
         Some("blank") => blank_demo().map_err(Into::into),
         Some("file") => play_capture().map_err(Into::into),
         _ => dashboard::run().map_err(Into::into), // default = dashboard (control plane)
     };
     if let Err(e) = r {
+        // A spawned mirror has no console, so surface fatal errors in a dialog.
+        if mode == Some("--mirror") {
+            show_error(&format!("PrismDesk couldn't start the mirror:\n\n{e}"));
+        }
         eprintln!("[error] {e}");
         std::process::exit(1);
+    }
+}
+
+/// Show a modal message box (used so a spawned mirror never fails silently).
+fn show_error(msg: &str) {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONWARNING, MB_OK};
+    unsafe {
+        let _ = MessageBoxW(
+            None,
+            &HSTRING::from(msg),
+            &HSTRING::from("PrismDesk"),
+            MB_OK | MB_ICONWARNING,
+        );
     }
 }
 
@@ -141,6 +160,7 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
 
     let mut backoff = Duration::from_millis(200);
     let cap = Duration::from_secs(5);
+    let mut codec = cfg.codec.clone(); // may downgrade h265 -> h264 if HEVC decode is absent
     let mut recorder: Option<record::Recorder> = None; // persists across reconnects
     // Rolling current-GOP buffer so recording can start instantly from the last
     // keyframe (this device's keyframes are ~10 s apart).
@@ -156,7 +176,7 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
             cfg.max_size,
             cfg.bitrate,
             cfg.fps,
-            &cfg.codec,
+            &codec,
             want_audio,
             true, // control (mouse) on
             cfg.serial.clone(),
@@ -208,7 +228,31 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
             _ => None,
         };
 
-        let mut dec = Decoder::new(mirror.device())?;
+        let mut dec = match Decoder::new(mirror.device(), &codec) {
+            Ok(d) => d,
+            Err(e) => {
+                // Tear down this session; the codec may not be decodable here.
+                drop(session);
+                let _ = net.join();
+                if let Some(h) = audio_net {
+                    let _ = h.join();
+                }
+                let hevc = codec.eq_ignore_ascii_case("h265") || codec.eq_ignore_ascii_case("hevc");
+                if hevc {
+                    show_error(
+                        "HEVC (Crisp preset) can't be decoded on this PC.\n\nInstall \"HEVC Video Extensions\" from the Microsoft Store to use Crisp, or use the Balanced / Low-latency preset.\n\nFalling back to H.264 now.",
+                    );
+                    codec = "h264".to_string();
+                } else {
+                    show_error(&format!("Failed to start the video decoder:\n\n{e}"));
+                    break 'session;
+                }
+                if pump_for(&mut mirror, backoff) {
+                    break 'session;
+                }
+                continue 'session;
+            }
+        };
         let mut out = Vec::new();
         let mut control = control_stream;
         let mut mouse_down = false;
@@ -423,7 +467,7 @@ fn play_capture() -> windows_core::Result<()> {
     let nals = split_nals(&data);
 
     let mut mirror = Mirror::new(432, 960, "PrismDesk — Mirror (Phase 1c)")?;
-    let mut dec = Decoder::new(mirror.device())?;
+    let mut dec = Decoder::new(mirror.device(), "h264")?;
     println!("PrismDesk engine · milestone 1c");
     println!("  rendering {path} on {}", mirror.adapter_name());
     println!("  {} NALs · looping playback (~12s, or close the window)", nals.len());
@@ -461,7 +505,7 @@ fn play_capture() -> windows_core::Result<()> {
         // Loop the capture until the window is closed so you can inspect it.
         let _ = start;
         // Re-create the decoder to replay the file cleanly after DRAIN.
-        dec = Decoder::new(mirror.device())?;
+        dec = Decoder::new(mirror.device(), "h264")?;
     }
 
     println!("[ok] rendered {shown} frames. Window closed cleanly.");

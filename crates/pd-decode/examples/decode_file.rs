@@ -14,7 +14,7 @@ fn main() -> windows_core::Result<()> {
     let (device, _ctx, _adapter, name) = unsafe { pd_render::nvidia_device()? };
     println!("decoding {path} ({} bytes) on {name}", data.len());
 
-    let mut dec = Decoder::new(&device)?;
+    let mut dec = Decoder::new(&device, "h264")?;
     let nals = split_nals(&data);
 
     let mut out = Vec::new();
