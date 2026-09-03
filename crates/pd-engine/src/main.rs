@@ -137,6 +137,16 @@ fn flag_value(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
 }
 
+/// A command from the dashboard (control plane), delivered on the mirror's
+/// stdin so record/snapshot/mute/stop work without focusing the mirror window.
+enum Cmd {
+    Shot,
+    Rec,
+    Mute,
+    Paste,
+    Stop,
+}
+
 /// Phase 1d — live mirror. Bring up the reverse-tunnel video session, read
 /// framed access units on a net thread, and decode+present on the main thread
 /// with present-on-arrival + drop-to-latest so latency can never accumulate.
@@ -176,6 +186,32 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
     let rec_audio: std::sync::Arc<std::sync::Mutex<Vec<u8>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new())); // PCM tap for recording
 
+    // Dashboard -> mirror command channel: the control-plane UI writes newline
+    // commands to our stdin so Snapshot/Record/Mute/Stop work without the mirror
+    // window having focus. Standalone (terminal) runs simply see no commands.
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            let cmd = match line.trim() {
+                "snapshot" | "shot" => Cmd::Shot,
+                "record" | "rec" => Cmd::Rec,
+                "mute" => Cmd::Mute,
+                "paste" => Cmd::Paste,
+                "stop" | "quit" => Cmd::Stop,
+                _ => continue,
+            };
+            if cmd_tx.send(cmd).is_err() {
+                break;
+            }
+        }
+    });
+
     'session: loop {
         // Bring up a session; on failure (device unplugged/sleeping) retry with
         // bounded backoff while the window stays responsive.
@@ -195,7 +231,7 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
             }
             Err(e) => {
                 eprintln!("[transport] {e} — retry in {:.1}s", backoff.as_secs_f32());
-                if pump_for(&mut mirror, backoff) {
+                if pump_for(&mut mirror, backoff, &cmd_rx) {
                     break 'session;
                 }
                 backoff = (backoff * 2).min(cap);
@@ -254,7 +290,7 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
                     show_error(&format!("Failed to start the video decoder:\n\n{e}"));
                     break 'session;
                 }
-                if pump_for(&mut mirror, backoff) {
+                if pump_for(&mut mirror, backoff, &cmd_rx) {
                     break 'session;
                 }
                 continue 'session;
@@ -286,12 +322,28 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
             if mirror.pump() {
                 break 'stream true;
             }
-            if mirror.mute_toggled() {
+            // Drain dashboard commands (stdin) and fold them into this frame's
+            // window-driven triggers so both paths share one handler.
+            let mut c_shot = false;
+            let mut c_rec = false;
+            let mut c_mute = false;
+            let mut c_paste = false;
+            loop {
+                match cmd_rx.try_recv() {
+                    Ok(Cmd::Shot) => c_shot = true,
+                    Ok(Cmd::Rec) => c_rec = true,
+                    Ok(Cmd::Mute) => c_mute = true,
+                    Ok(Cmd::Paste) => c_paste = true,
+                    Ok(Cmd::Stop) => break 'stream true,
+                    Err(_) => break,
+                }
+            }
+            if mirror.mute_toggled() || c_mute {
                 if let Some(sk) = &sink {
                     println!("[audio] {}", if sk.toggle_mute() { "muted" } else { "unmuted" });
                 }
             }
-            if mirror.shot_requested() {
+            if mirror.shot_requested() || c_shot {
                 let path = screenshot_path();
                 match mirror.screenshot(&path) {
                     Ok(true) => println!("[shot] saved {path}"),
@@ -299,7 +351,7 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
                     Err(e) => eprintln!("[shot] {e:?}"),
                 }
             }
-            if mirror.rec_toggled() {
+            if mirror.rec_toggled() || c_rec {
                 if let Some(r) = recorder.take() {
                     match r.finish() {
                         Some((p, n)) => println!("[rec] saved {p} ({n} frames)"),
@@ -321,7 +373,7 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
                 }
             }
             // Clipboard PC -> device (V), and device -> PC (auto).
-            if mirror.paste_requested() {
+            if mirror.paste_requested() || c_paste {
                 if let Some(ctl) = &mut control {
                     if let Ok(t) = clipboard_win::get_clipboard_string() {
                         control::send(ctl, &control::set_clipboard(&t, true));
@@ -440,7 +492,7 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
             break 'session;
         }
         println!("[transport] stream ended — reconnecting");
-        if pump_for(&mut mirror, backoff) {
+        if pump_for(&mut mirror, backoff, &cmd_rx) {
             break 'session;
         }
         backoff = (backoff * 2).min(cap);
@@ -456,12 +508,19 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
 }
 
 /// Pump window messages for `dur` so the window stays responsive/closable while
-/// idle (e.g. during a reconnect backoff). Returns true if the window closed.
-fn pump_for(mirror: &mut Mirror, dur: Duration) -> bool {
+/// idle (e.g. during a reconnect backoff). Also honors a dashboard `Stop`
+/// arriving on `cmd_rx` while disconnected (other commands are no-ops here).
+/// Returns true if the mirror should shut down (window closed or Stop received).
+fn pump_for(mirror: &mut Mirror, dur: Duration, cmd_rx: &std::sync::mpsc::Receiver<Cmd>) -> bool {
     let end = Instant::now() + dur;
     while Instant::now() < end {
         if mirror.pump() {
             return true;
+        }
+        while let Ok(c) = cmd_rx.try_recv() {
+            if let Cmd::Stop = c {
+                return true;
+            }
         }
         std::thread::sleep(Duration::from_millis(15));
     }

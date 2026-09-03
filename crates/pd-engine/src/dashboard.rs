@@ -4,8 +4,9 @@
 //! isolated.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -120,11 +121,28 @@ enum Tab {
     About,
 }
 
+/// A live mirror child process plus its command pipe and runtime toggles.
+struct Proc {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    recording: bool,
+    muted: bool,
+}
+impl Proc {
+    /// Send one newline command to the mirror; returns false if the pipe is gone.
+    fn send(&mut self, cmd: &str) -> bool {
+        if let Some(si) = &mut self.stdin {
+            return writeln!(si, "{cmd}").and_then(|_| si.flush()).is_ok();
+        }
+        false
+    }
+}
+
 struct Dashboard {
     devices: Vec<Device>,
     last_refresh: Instant,
     status: String,
-    running: HashMap<String, Child>,        // serial -> live mirror process
+    running: HashMap<String, Proc>,         // serial -> live mirror process
     settings: HashMap<String, DevSettings>, // serial -> per-device config
     tab: Tab,
 }
@@ -147,7 +165,7 @@ impl Dashboard {
         self.devices = list_devices();
         // Drop mirrors whose window the user closed (child exited).
         self.running
-            .retain(|_, c| matches!(c.try_wait(), Ok(None)));
+            .retain(|_, p| matches!(p.child.try_wait(), Ok(None)));
     }
 
     fn start_mirror(&mut self, serial: &str) {
@@ -165,9 +183,14 @@ impl Dashboard {
         if !s.input {
             cmd.arg("--no-control");
         }
+        cmd.stdin(Stdio::piped()); // command channel for Snapshot/Record/Mute/Stop
         match cmd.spawn() {
-            Ok(child) => {
-                self.running.insert(serial.to_string(), child);
+            Ok(mut child) => {
+                let stdin = child.stdin.take();
+                self.running.insert(
+                    serial.to_string(),
+                    Proc { child, stdin, recording: false, muted: false },
+                );
                 self.status = format!("Mirroring · {serial}");
             }
             Err(e) => self.status = format!("Failed to start: {e}"),
@@ -175,8 +198,12 @@ impl Dashboard {
     }
 
     fn stop_mirror(&mut self, serial: &str) {
-        if let Some(mut c) = self.running.remove(serial) {
-            let _ = c.kill();
+        if let Some(mut p) = self.running.remove(serial) {
+            // Ask for a clean shutdown (flushes any active recording); if the
+            // pipe is already gone, fall back to killing the process.
+            if !p.send("stop") {
+                let _ = p.child.kill();
+            }
             self.status = format!("Stopped · {serial}");
         }
     }
@@ -303,9 +330,55 @@ impl eframe::App for Dashboard {
                             });
                             if d.authorized {
                                 ui.add_space(8.0);
-                                let running = self.running.contains_key(&d.serial);
-                                let s = self.settings.entry(d.serial.clone()).or_default();
-                                ui.add_enabled_ui(!running, |ui| {
+                                if self.running.contains_key(&d.serial) {
+                                    // Live: dashboard-driven capture controls
+                                    // (mirror window need not be focused).
+                                    let audio_on = self
+                                        .settings
+                                        .get(&d.serial)
+                                        .map(|s| s.audio)
+                                        .unwrap_or(true);
+                                    ui.horizontal(|ui| {
+                                        if action_btn(ui, "Snapshot", SURFACE2, TEXT).clicked() {
+                                            if let Some(p) = self.running.get_mut(&d.serial) {
+                                                p.send("snapshot");
+                                            }
+                                            self.status = format!("Snapshot · {}", d.model);
+                                        }
+                                        let rec = self
+                                            .running
+                                            .get(&d.serial)
+                                            .map(|p| p.recording)
+                                            .unwrap_or(false);
+                                        let (rlabel, rfill, rtext) = if rec {
+                                            ("Stop Rec", STOP, Color32::WHITE)
+                                        } else {
+                                            ("Record", SURFACE2, TEXT)
+                                        };
+                                        if action_btn(ui, rlabel, rfill, rtext).clicked() {
+                                            if let Some(p) = self.running.get_mut(&d.serial) {
+                                                p.send("record");
+                                                p.recording = !p.recording;
+                                            }
+                                        }
+                                        if audio_on {
+                                            let muted = self
+                                                .running
+                                                .get(&d.serial)
+                                                .map(|p| p.muted)
+                                                .unwrap_or(false);
+                                            let mlabel = if muted { "Unmute" } else { "Mute" };
+                                            if action_btn(ui, mlabel, SURFACE2, TEXT).clicked() {
+                                                if let Some(p) = self.running.get_mut(&d.serial) {
+                                                    p.send("mute");
+                                                    p.muted = !p.muted;
+                                                }
+                                            }
+                                        }
+                                    });
+                                } else {
+                                    // Idle: per-device quality/config.
+                                    let s = self.settings.entry(d.serial.clone()).or_default();
                                     ui.horizontal(|ui| {
                                         egui::ComboBox::from_id_salt(("p", d.serial.as_str()))
                                             .selected_text(PRESETS[s.preset])
@@ -318,7 +391,7 @@ impl eframe::App for Dashboard {
                                         ui.checkbox(&mut s.audio, RichText::new("Audio").color(TEXT));
                                         ui.checkbox(&mut s.input, RichText::new("Input").color(TEXT));
                                     });
-                                });
+                                }
                             }
                         });
                     ui.add_space(8.0);
@@ -369,6 +442,16 @@ fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
             add(ui);
         });
     ui.add_space(10.0);
+}
+
+/// A small pill button used for the per-device capture actions.
+fn action_btn(ui: &mut egui::Ui, label: &str, fill: Color32, text: Color32) -> egui::Response {
+    ui.add(
+        egui::Button::new(RichText::new(label).color(text).strong())
+            .fill(fill)
+            .rounding(Rounding::same(8.0))
+            .min_size(egui::vec2(0.0, 30.0)),
+    )
 }
 
 /// One "Key  —  meaning" row inside a shortcuts card.
