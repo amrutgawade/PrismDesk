@@ -20,3 +20,7 @@ desktop.ini
 *.pfx
 *.snk
 .env
+
+# Vendored GNU-toolchain shim binaries (regenerate with tools/setup-gnu-shim.ps1)
+/tools/gnu-shim/*.exe
+/tools/gnu-shim/*.a

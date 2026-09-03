@@ -15,6 +15,7 @@ use pd_render::Mirror;
 
 mod aac;
 mod control;
+mod dashboard;
 mod record;
 mod transport;
 
@@ -26,20 +27,26 @@ struct Config {
     bitrate: u32,
     fps: u32,
     codec: String,
+    audio: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { max_size: 1600, bitrate: 20_000_000, fps: 60, codec: "h264".into() }
+        Self { max_size: 1600, bitrate: 20_000_000, fps: 60, codec: "h264".into(), audio: true }
     }
 }
 
-fn main() -> windows_core::Result<()> {
+fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        Some("blank") => blank_demo(),               // 1a: animated clear
-        Some("file") => play_capture(),              // 1c: play the canned capture
-        _ => live_mirror(parse_config(&args)),       // 1d: live mirror (USB)
+    let r: Result<(), Box<dyn std::error::Error>> = match args.first().map(String::as_str) {
+        Some("--mirror") => live_mirror(parse_config(&args)).map_err(Into::into),
+        Some("blank") => blank_demo().map_err(Into::into),
+        Some("file") => play_capture().map_err(Into::into),
+        _ => dashboard::run().map_err(Into::into), // default = dashboard (control plane)
+    };
+    if let Err(e) = r {
+        eprintln!("[error] {e}");
+        std::process::exit(1);
     }
 }
 
@@ -49,10 +56,22 @@ fn parse_config(args: &[String]) -> Config {
     if let Some(p) = flag_value(args, "--preset") {
         match p.as_str() {
             "crisp" | "reading" => {
-                c = Config { max_size: 1920, bitrate: 28_000_000, fps: 60, codec: "h265".into() }
+                c = Config {
+                    max_size: 1920,
+                    bitrate: 28_000_000,
+                    fps: 60,
+                    codec: "h265".into(),
+                    audio: c.audio,
+                }
             }
             "lowlatency" | "low" => {
-                c = Config { max_size: 1366, bitrate: 15_000_000, fps: 90, codec: "h264".into() }
+                c = Config {
+                    max_size: 1366,
+                    bitrate: 15_000_000,
+                    fps: 90,
+                    codec: "h264".into(),
+                    audio: c.audio,
+                }
             }
             _ => {} // "balanced" == defaults
         }
@@ -68,6 +87,9 @@ fn parse_config(args: &[String]) -> Config {
     }
     if let Some(v) = flag_value(args, "--codec") {
         c.codec = v;
+    }
+    if args.iter().any(|a| a == "--no-audio") {
+        c.audio = false;
     }
     c
 }
@@ -102,7 +124,7 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
             None
         }
     };
-    let want_audio = sink.is_some();
+    let want_audio = cfg.audio && sink.is_some();
 
     let mut backoff = Duration::from_millis(200);
     let cap = Duration::from_secs(5);

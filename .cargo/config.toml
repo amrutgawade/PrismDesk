@@ -1,0 +1,10 @@
+# The GNU toolchain doesn't ship libshlwapi.a (needed by the egui/eframe
+# dashboard) — we generate it into tools/gnu-shim and add it to the link path
+# here. That dir ALSO holds dlltool.exe + as.exe (the standalone GNU install
+# lacks a working assembler for raw-dylib crates like parking_lot_core); put it
+# FIRST on PATH before building:
+#   PowerShell:  $env:Path = "$PWD\tools\gnu-shim;$env:Path"
+# Regenerate the shim with tools/setup-gnu-shim.ps1 if it's missing.
+# (Harmless on the msvc target — an unused extra -L search path.)
+[build]
+rustflags = ["-L", "C:/Users/Amrut/Desktop/PrismDesk/tools/gnu-shim"]
