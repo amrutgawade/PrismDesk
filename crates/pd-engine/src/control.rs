@@ -4,9 +4,14 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
+const TYPE_INJECT_KEYCODE: u8 = 0;
+const TYPE_INJECT_TEXT: u8 = 1;
 const TYPE_INJECT_TOUCH: u8 = 2;
 const TYPE_INJECT_SCROLL: u8 = 3;
 const TYPE_SET_CLIPBOARD: u8 = 9;
+
+pub const KEY_DOWN: u8 = 0; // AKEY_EVENT_ACTION_DOWN
+pub const KEY_UP: u8 = 1;
 const POINTER_MOUSE: u64 = 0xFFFF_FFFF_FFFF_FFFF; // scrcpy POINTER_ID_MOUSE
 const BUTTON_PRIMARY: u32 = 1; // AMOTION_EVENT_BUTTON_PRIMARY
 
@@ -51,6 +56,27 @@ pub fn scroll(x: u32, y: u32, w: u32, h: u32, vscroll: f32) -> Vec<u8> {
     b.extend_from_slice(&f2i16(0.0).to_be_bytes()); // hscroll
     b.extend_from_slice(&f2i16(vscroll).to_be_bytes());
     b.extend_from_slice(&0u32.to_be_bytes()); // buttons
+    b
+}
+
+/// INJECT_TEXT: type UTF-8 text into the focused field.
+pub fn inject_text(text: &str) -> Vec<u8> {
+    let t = text.as_bytes();
+    let mut b = Vec::with_capacity(5 + t.len());
+    b.push(TYPE_INJECT_TEXT);
+    b.extend_from_slice(&(t.len() as u32).to_be_bytes());
+    b.extend_from_slice(t);
+    b
+}
+
+/// INJECT_KEYCODE (14 bytes): an Android key event (down/up).
+pub fn inject_keycode(action: u8, keycode: i32, repeat: u32, metastate: u32) -> Vec<u8> {
+    let mut b = Vec::with_capacity(14);
+    b.push(TYPE_INJECT_KEYCODE);
+    b.push(action);
+    b.extend_from_slice(&(keycode as u32).to_be_bytes());
+    b.extend_from_slice(&repeat.to_be_bytes());
+    b.extend_from_slice(&metastate.to_be_bytes());
     b
 }
 

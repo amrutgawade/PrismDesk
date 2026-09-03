@@ -33,12 +33,14 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
     GetWindowLongPtrW, GetWindowRect, LoadCursorW, PeekMessageW, PostQuitMessage, RegisterClassExW,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
     CW_USEDEFAULT, GWL_STYLE, HWND_TOP, IDC_ARROW, MSG, PM_REMOVE, SWP_FRAMECHANGED,
-    SWP_NOOWNERZORDER, SW_SHOW, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN,
+    SWP_NOOWNERZORDER, SW_SHOW, WINDOW_EX_STYLE, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_KEYDOWN,
+    WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_POPUP,
     WS_VISIBLE,
 };
@@ -48,6 +50,7 @@ const VK_M: usize = 0x4D;
 const VK_S: usize = 0x53;
 const VK_R: usize = 0x52;
 const VK_V: usize = 0x56;
+const VK_CONTROL: i32 = 0x11;
 
 /// Set by the window proc on F11; consumed by `pump` to toggle fullscreen.
 static TOGGLE_FS: AtomicBool = AtomicBool::new(false);
@@ -72,6 +75,10 @@ pub struct MouseEvent {
 static INPUT: Mutex<Vec<MouseEvent>> = Mutex::new(Vec::new());
 /// Last mouse client position (for wheel events, whose coords are screen-space).
 static LAST_MOUSE: Mutex<(i32, i32)> = Mutex::new((0, 0));
+/// Typed text (UTF-16 code units from WM_CHAR), drained -> INJECT_TEXT.
+static TEXT_IN: Mutex<Vec<u16>> = Mutex::new(Vec::new());
+/// Special-key Android keycodes (Backspace/Enter/arrows…), drained -> INJECT_KEYCODE.
+static KEY_IN: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 
 mod video;
 use video::Video;
@@ -158,6 +165,23 @@ impl Mirror {
     /// True once if the user pressed V since the last check (paste PC clipboard).
     pub fn paste_requested(&self) -> bool {
         TOGGLE_PASTE.swap(false, Ordering::Relaxed)
+    }
+
+    /// Drain typed text (for INJECT_TEXT).
+    pub fn drain_text(&self) -> String {
+        TEXT_IN
+            .lock()
+            .map(|mut v| {
+                let s = String::from_utf16_lossy(&v);
+                v.clear();
+                s
+            })
+            .unwrap_or_default()
+    }
+
+    /// Drain special-key Android keycodes (for INJECT_KEYCODE).
+    pub fn drain_keys(&self) -> Vec<i32> {
+        KEY_IN.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
     }
 
     /// Drain queued mouse events (raw window client coordinates).
@@ -384,18 +408,42 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 LRESULT(0)
             }
             WM_KEYDOWN => {
+                let ctrl = (GetKeyState(VK_CONTROL) as i16) < 0;
                 if wparam.0 == VK_F11 {
                     TOGGLE_FS.store(true, Ordering::Relaxed);
-                } else if wparam.0 == VK_M {
+                    LRESULT(0)
+                } else if ctrl && wparam.0 == VK_M {
                     TOGGLE_MUTE.store(true, Ordering::Relaxed);
-                } else if wparam.0 == VK_S {
+                    LRESULT(0)
+                } else if ctrl && wparam.0 == VK_S {
                     TOGGLE_SHOT.store(true, Ordering::Relaxed);
-                } else if wparam.0 == VK_R {
+                    LRESULT(0)
+                } else if ctrl && wparam.0 == VK_R {
                     TOGGLE_REC.store(true, Ordering::Relaxed);
-                } else if wparam.0 == VK_V {
+                    LRESULT(0)
+                } else if ctrl && wparam.0 == VK_V {
                     TOGGLE_PASTE.store(true, Ordering::Relaxed);
+                    LRESULT(0)
+                } else if let Some(kc) = android_keycode(wparam.0) {
+                    if let Ok(mut q) = KEY_IN.lock() {
+                        if q.len() < 256 {
+                            q.push(kc);
+                        }
+                    }
+                    LRESULT(0)
+                } else {
+                    // Printable keys fall through to WM_CHAR for text injection.
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
                 }
-                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_CHAR => {
+                let c = wparam.0 as u16;
+                if c >= 0x20 && c != 0x7f {
+                    if let Ok(mut t) = TEXT_IN.lock() {
+                        t.push(c);
+                    }
+                }
+                LRESULT(0)
             }
             WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP => {
                 let x = (lparam.0 & 0xffff) as i16 as i32;
@@ -529,6 +577,25 @@ fn push_input(e: MouseEvent) {
             q.push(e);
         }
     }
+}
+
+/// Map a Windows virtual-key to an Android keycode for the non-text keys we
+/// forward. Returns None for keys that should type via WM_CHAR instead.
+fn android_keycode(vk: usize) -> Option<i32> {
+    Some(match vk {
+        0x08 => 67,  // Backspace  -> KEYCODE_DEL
+        0x0D => 66,  // Enter      -> KEYCODE_ENTER
+        0x09 => 61,  // Tab        -> KEYCODE_TAB
+        0x1B => 111, // Esc        -> KEYCODE_ESCAPE
+        0x2E => 112, // Delete     -> KEYCODE_FORWARD_DEL
+        0x25 => 21,  // Left
+        0x26 => 19,  // Up
+        0x27 => 22,  // Right
+        0x28 => 20,  // Down
+        0x24 => 122, // Home       -> KEYCODE_MOVE_HOME
+        0x23 => 123, // End        -> KEYCODE_MOVE_END
+        _ => return None,
+    })
 }
 
 fn write_png_bgra(path: &str, w: u32, h: u32, bgra: &[u8]) -> std::io::Result<()> {

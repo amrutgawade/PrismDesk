@@ -85,7 +85,7 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
     let mut mirror = Mirror::new(500, 1040, "PrismDesk — Live Mirror")?;
     println!("PrismDesk · live mirror (USB, adb reverse)");
     println!(
-        "  {} · {} · {}Mbps · {}fps · mouse · F11 fs · M mute · S shot · R rec · V paste · close",
+        "  {} · {} · {}Mbps · {}fps · mouse+keyboard · F11 fs · Ctrl+M/S/R/V · close",
         cfg.codec, cfg.max_size, cfg.bitrate / 1_000_000, cfg.fps
     );
 
@@ -226,6 +226,17 @@ fn live_mirror(cfg: Config) -> windows_core::Result<()> {
                 if let Some(t) = g.take() {
                     let _ = clipboard_win::set_clipboard_string(&t);
                     println!("[clip] device -> PC ({} chars)", t.len());
+                }
+            }
+            // Keyboard -> device (typed text + special keys).
+            if let Some(ctl) = &mut control {
+                let text = mirror.drain_text();
+                if !text.is_empty() {
+                    control::send(ctl, &control::inject_text(&text));
+                }
+                for kc in mirror.drain_keys() {
+                    control::send(ctl, &control::inject_keycode(control::KEY_DOWN, kc, 0, 0));
+                    control::send(ctl, &control::inject_keycode(control::KEY_UP, kc, 0, 0));
                 }
             }
             // Mouse -> device touch/scroll injection.
