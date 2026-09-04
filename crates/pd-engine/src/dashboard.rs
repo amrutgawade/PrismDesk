@@ -136,6 +136,7 @@ mod ic {
     pub const INFO: char = '\u{e0f9}';
     pub const MOUSE: char = '\u{e11f}';
     pub const SLIDERS: char = '\u{e29a}';
+    pub const CHECK: char = '\u{e06c}';
 }
 
 /// The named egui font family that resolves to lucide.ttf.
@@ -489,6 +490,10 @@ struct Dashboard {
     dark: bool,
     pal: Palette,
     dev_info: HashMap<String, (String, bool)>, // serial -> (marketing name, is_tablet)
+    status_at: Instant,                        // when `status` last changed (toast fade)
+    last_status: String,                       // to detect status changes
+    rec_since: HashMap<String, Instant>,       // serial -> recording start (timer)
+    hovered_card: Option<String>,              // serial hovered last frame (elevation)
 }
 
 impl Dashboard {
@@ -505,6 +510,10 @@ impl Dashboard {
             dark,
             pal: Palette::new(dark),
             dev_info: HashMap::new(),
+            status_at: Instant::now(),
+            last_status: String::new(),
+            rec_since: HashMap::new(),
+            hovered_card: None,
         };
         d.refresh();
         d
@@ -608,6 +617,54 @@ impl Dashboard {
         self.dark = !self.dark;
         self.pal = Palette::new(self.dark);
         setup_style(ctx, &self.pal);
+    }
+
+    /// Draw one device card (shadow, live rail, hover elevation) and its
+    /// contents. Returns (settings changed, is-hovered).
+    fn render_card(&mut self, ui: &mut egui::Ui, d: &Device, pal: &Palette) -> (bool, bool) {
+        let live = self.running.contains_key(&d.serial);
+        let hovered = self.hovered_card.as_deref() == Some(d.serial.as_str());
+        let mut changed = false;
+        let mut is_hovered = false;
+        ui.push_id(&d.serial, |ui| {
+            let stroke_col = if live {
+                lerp_color(pal.border, pal.accent, 0.55)
+            } else {
+                pal.border
+            };
+            // Lift the shadow a touch on hover.
+            let (dy, blur, spread) = if hovered {
+                (5.0, 22.0, -3.0)
+            } else {
+                (3.0, 16.0, -4.0)
+            };
+            let resp = egui::Frame::default()
+                .fill(pal.surface)
+                .stroke(Stroke::new(1.0, stroke_col))
+                .rounding(Rounding::same(12.0))
+                .shadow(egui::epaint::Shadow {
+                    offset: egui::vec2(0.0, dy),
+                    blur,
+                    spread,
+                    color: pal.shadow,
+                })
+                .inner_margin(egui::Margin::same(14.0))
+                .show(ui, |ui| {
+                    changed |= device_card(ui, pal, d, self);
+                });
+            if live {
+                let r = resp.response.rect;
+                let rail = egui::Rect::from_min_max(
+                    egui::pos2(r.left(), r.top() + 12.0),
+                    egui::pos2(r.left() + 3.0, r.bottom() - 12.0),
+                );
+                ui.painter().rect_filled(rail, Rounding::same(2.0), pal.accent);
+            }
+            if ui.rect_contains_pointer(resp.response.rect) {
+                is_hovered = true;
+            }
+        });
+        (changed, is_hovered)
     }
 }
 
@@ -714,6 +771,12 @@ impl eframe::App for Dashboard {
         }
         ctx.request_repaint_after(Duration::from_secs(1));
 
+        // Stamp when the status text last changed, for the toast fade.
+        if self.status != self.last_status {
+            self.last_status = self.status.clone();
+            self.status_at = Instant::now();
+        }
+
         let pal = self.pal;
         let mut theme_clicked = false;
         let mut config_changed = false;
@@ -721,6 +784,10 @@ impl eframe::App for Dashboard {
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(pal.bg).inner_margin(egui::Margin::same(18.0)))
             .show(ctx, |ui| {
+                // Cap width on very wide windows — but never grow past the actual
+                // window (set_max_width would otherwise stretch content off-screen
+                // when the window is narrow).
+                ui.set_max_width(ui.available_width().min(880.0));
                 // ---- header ------------------------------------------------
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("◆").size(15.0).color(pal.accent));
@@ -794,47 +861,35 @@ impl eframe::App for Dashboard {
                     empty_state(ui, &pal);
                 }
 
-                for d in &devices {
-                    let live = self.running.contains_key(&d.serial);
-                    // Scope every widget in this card by the device serial so
-                    // identical buttons/combos across cards get unique egui ids.
-                    ui.push_id(&d.serial, |ui| {
-                        let stroke_col = if live {
-                            lerp_color(pal.border, pal.accent, 0.55)
-                        } else {
-                            pal.border
-                        };
-                        let resp = egui::Frame::default()
-                            .fill(pal.surface)
-                            .stroke(Stroke::new(1.0, stroke_col))
-                            .rounding(Rounding::same(12.0))
-                            .shadow(egui::epaint::Shadow {
-                                offset: egui::vec2(0.0, 3.0),
-                                blur: 16.0,
-                                spread: -4.0,
-                                color: pal.shadow,
-                            })
-                            .inner_margin(egui::Margin::same(14.0))
-                            .show(ui, |ui| {
-                                config_changed |= device_card(ui, &pal, d, self);
-                            });
-                        // Live devices get a cyan→violet accent rail on the left edge.
-                        if live {
-                            let r = resp.response.rect;
-                            let rail = egui::Rect::from_min_max(
-                                egui::pos2(r.left(), r.top() + 12.0),
-                                egui::pos2(r.left() + 3.0, r.bottom() - 12.0),
-                            );
-                            ui.painter().rect_filled(rail, Rounding::same(2.0), pal.accent);
+                // Responsive: two columns only when there's room AND ≥2 devices.
+                let cols = if ui.available_width() >= 680.0 && devices.len() >= 2 {
+                    2
+                } else {
+                    1
+                };
+                let mut next_hovered = None;
+                for chunk in devices.chunks(cols) {
+                    if cols == 1 {
+                        let d = &chunk[0];
+                        let (ch, hov) = self.render_card(ui, d, &pal);
+                        config_changed |= ch;
+                        if hov {
+                            next_hovered = Some(d.serial.clone());
                         }
-                    });
+                    } else {
+                        ui.columns(cols, |columns| {
+                            for (i, d) in chunk.iter().enumerate() {
+                                let (ch, hov) = self.render_card(&mut columns[i], d, &pal);
+                                config_changed |= ch;
+                                if hov {
+                                    next_hovered = Some(d.serial.clone());
+                                }
+                            }
+                        });
+                    }
                     ui.add_space(10.0);
                 }
-
-                if !self.status.is_empty() {
-                    ui.add_space(4.0);
-                    ui.label(RichText::new(&self.status).small().color(pal.cyan));
-                }
+                self.hovered_card = next_hovered;
             });
 
         if theme_clicked {
@@ -843,6 +898,43 @@ impl eframe::App for Dashboard {
         }
         if config_changed {
             save_config(self.dark, &self.settings);
+        }
+
+        // ---- toast (auto-fading status), floating bottom-center ----
+        if !self.status.is_empty() {
+            let elapsed = self.status_at.elapsed().as_secs_f32();
+            let alpha = if elapsed < 3.0 {
+                1.0
+            } else {
+                (1.0 - (elapsed - 3.0) / 0.6).clamp(0.0, 1.0)
+            };
+            if alpha > 0.01 {
+                ctx.request_repaint(); // animate the fade
+                let fade = |c: Color32| c.linear_multiply(alpha);
+                egui::Area::new(egui::Id::new("pd_toast"))
+                    .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -16.0))
+                    .interactable(false)
+                    .show(ctx, |ui| {
+                        egui::Frame::default()
+                            .fill(fade(pal.surface2))
+                            .stroke(Stroke::new(1.0, fade(pal.border)))
+                            .rounding(Rounding::same(10.0))
+                            .shadow(egui::epaint::Shadow {
+                                offset: egui::vec2(0.0, 4.0),
+                                blur: 18.0,
+                                spread: -4.0,
+                                color: fade(pal.shadow),
+                            })
+                            .inner_margin(egui::Margin::symmetric(13.0, 9.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(icon_rt(ic::CHECK, 14.0, fade(pal.cyan)));
+                                    ui.add_space(2.0);
+                                    ui.label(RichText::new(&self.status).color(fade(pal.text)));
+                                });
+                            });
+                    });
+            }
         }
     }
 }
@@ -931,14 +1023,21 @@ fn device_card(ui: &mut egui::Ui, pal: &Palette, d: &Device, app: &mut Dashboard
                 };
             }
             // Label + icon reflect the mirror's reported state (status channel),
-            // so they stay right even for in-window Ctrl+R toggles.
+            // so they stay right even for in-window Ctrl+R toggles. While
+            // recording, the button counts up (mm:ss).
             let rec = app.running.get(&d.serial).map(|p| p.recording.load(Ordering::Relaxed)).unwrap_or(false);
-            let (rch, rlabel, rfill, rcol) = if rec {
-                (ic::SQUARE, "Stop", pal.live_weak, pal.live)
+            let rlabel;
+            let (rch, rfill, rcol) = if rec {
+                let start = *app.rec_since.entry(d.serial.clone()).or_insert_with(Instant::now);
+                let secs = start.elapsed().as_secs();
+                rlabel = format!("{}:{:02}", secs / 60, secs % 60);
+                (ic::SQUARE, pal.live_weak, pal.live)
             } else {
-                (ic::CIRCLE, "Record", pal.surface2, pal.text2)
+                app.rec_since.remove(&d.serial);
+                rlabel = "Record".to_string();
+                (ic::CIRCLE, pal.surface2, pal.text2)
             };
-            if action_btn(ui, pal, rch, rlabel, rfill, rcol).clicked() {
+            if action_btn(ui, pal, rch, &rlabel, rfill, rcol).clicked() {
                 let ok = app.running.get(&d.serial).map(|p| p.send("record")).unwrap_or(false);
                 app.status = if ok {
                     format!("{} · {}", if rec { "Stopping recording" } else { "Recording" }, d.model)
@@ -1178,6 +1277,13 @@ fn about_view(ui: &mut egui::Ui, pal: &Palette) {
             .small()
             .color(pal.dim),
         );
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Designed & built by").small().color(pal.dim));
+            ui.add_space(-1.0);
+            ui.hyperlink_to(sb("Amrut Gawade", 13.0, pal.accent), "https://amrut.is-a.dev/")
+                .on_hover_text("amrut.is-a.dev");
+        });
     });
     card(ui, pal, |ui| {
         ui.label(sb("Open-source components", 14.0, pal.text));
