@@ -843,6 +843,11 @@ impl eframe::App for Dashboard {
                 });
                 ui.add_space(12.0);
 
+                // Header + tabs stay pinned; the tab content scrolls so nothing
+                // is cut off on a short window.
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
                 if self.tab == Tab::Shortcuts {
                     shortcuts_view(ui, &pal);
                     return;
@@ -890,6 +895,7 @@ impl eframe::App for Dashboard {
                     ui.add_space(10.0);
                 }
                 self.hovered_card = next_hovered;
+                    });
             });
 
         if theme_clicked {
