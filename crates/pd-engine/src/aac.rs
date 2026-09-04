@@ -4,7 +4,7 @@
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 
-use windows::core::{Interface, Result};
+use windows::core::Result;
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::CoTaskMemFree;
 

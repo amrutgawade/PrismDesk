@@ -8,6 +8,10 @@
 //! Run:  cargo run -p pd-engine                 (play the canned capture ~12s)
 //!       cargo run -p pd-engine -- blank         (milestone 1a: animated clear)
 
+// Release builds are a GUI app with no console window. Debug builds keep the
+// console so `cargo run` output and println! diagnostics stay visible.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::time::{Duration, Instant};
 
 use pd_decode::Decoder;
@@ -49,6 +53,8 @@ impl Default for Config {
 }
 
 fn main() {
+    #[cfg(not(debug_assertions))]
+    silence_stdio();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mode = args.first().map(String::as_str);
     let r: Result<(), Box<dyn std::error::Error>> = match mode {
@@ -87,6 +93,58 @@ pub(crate) fn debug_log(role: &str, msg: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "{ms} {msg}");
     }
+}
+
+/// In release the app is a GUI process with no console, so `std::io::stdout()`
+/// has no valid handle and `println!`/`eprintln!` would return an error — and
+/// Rust's print macros PANIC on a write error. That would crash the mirror on
+/// its first log line. Point stdout/stderr at `NUL` so every print is a safe
+/// no-op (both the dashboard and each spawned mirror call this first thing).
+#[cfg(not(debug_assertions))]
+fn silence_stdio() {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+    if let Ok(f) = std::fs::OpenOptions::new().write(true).open("NUL") {
+        let h = HANDLE(f.as_raw_handle());
+        unsafe {
+            let _ = SetStdHandle(STD_OUTPUT_HANDLE, h);
+            let _ = SetStdHandle(STD_ERROR_HANDLE, h);
+        }
+        std::mem::forget(f); // keep the NUL handle open for the process lifetime
+    }
+}
+
+/// Windows process creation flag that suppresses the console window a
+/// console-subsystem child (adb, the mirror) would otherwise flash. Applied to
+/// every spawned process via `CommandExt::creation_flags`.
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Directory containing the running executable — the anchor for locating bundled
+/// runtime assets (scrcpy server, adb) so the app works from any folder, not just
+/// the build/working directory.
+pub(crate) fn exe_dir() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+}
+
+/// Locate the adb executable: bundled next to the exe, then in an `exe/platform-tools`
+/// folder, then the conventional `C:\platform-tools`, else `adb` on PATH.
+pub(crate) fn adb_path() -> std::path::PathBuf {
+    use std::path::{Path, PathBuf};
+    if let Some(dir) = exe_dir() {
+        for c in [dir.join("adb.exe"), dir.join("platform-tools").join("adb.exe")] {
+            if c.exists() {
+                return c;
+            }
+        }
+    }
+    let sys = Path::new(r"C:\platform-tools\adb.exe");
+    if sys.exists() {
+        return sys.to_path_buf();
+    }
+    PathBuf::from("adb")
 }
 
 /// Show a modal message box (used so a spawned mirror never fails silently).

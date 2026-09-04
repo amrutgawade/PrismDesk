@@ -198,7 +198,7 @@ fn icon_label(ch: char, label: &str, icon_col: Color32, text_col: Color32) -> eg
 fn icon_button(ui: &mut egui::Ui, pal: &Palette, ch: char, tip: &str) -> egui::Response {
     let btn = egui::Button::new(icon_rt(ch, 15.0, pal.text2))
         .fill(pal.surface2)
-        .stroke(Stroke::new(1.0, pal.border))
+        .stroke(Stroke::new(1.0_f32,pal.border))
         .rounding(Rounding::same(8.0))
         .min_size(egui::vec2(32.0, 30.0));
     ui.add(btn).on_hover_text(tip)
@@ -218,12 +218,7 @@ fn pill(ui: &mut egui::Ui, text: RichText, bg: Color32) {
 // ============================ adb / devices ============================
 
 fn adb_path() -> PathBuf {
-    let bundled = Path::new(r"C:\platform-tools\adb.exe");
-    if bundled.exists() {
-        bundled.to_path_buf()
-    } else {
-        PathBuf::from("adb")
-    }
+    crate::adb_path()
 }
 
 #[derive(Clone)]
@@ -313,6 +308,15 @@ fn save_config(dark: bool, settings: &HashMap<String, DevSettings>) {
 
 // ============================ app setup ============================
 
+/// The app/taskbar/title-bar icon (256×256 RGBA, generated from the prism mark).
+fn app_icon() -> egui::IconData {
+    egui::IconData {
+        rgba: include_bytes!("../assets/icon/prismdesk-256.rgba").to_vec(),
+        width: 256,
+        height: 256,
+    }
+}
+
 pub fn run() -> eframe::Result<()> {
     let cfg = AppConfig::load();
     let dark = cfg.dark;
@@ -320,6 +324,7 @@ pub fn run() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([460.0, 600.0])
             .with_min_inner_size([380.0, 480.0])
+            .with_icon(app_icon())
             .with_title("PrismDesk"),
         ..Default::default()
     };
@@ -403,14 +408,14 @@ fn setup_style(ctx: &egui::Context, pal: &Palette) {
     v.extreme_bg_color = pal.extreme;
     v.override_text_color = Some(pal.text);
     v.selection.bg_fill = pal.accent.linear_multiply(0.35);
-    v.selection.stroke = Stroke::new(1.0, pal.accent);
+    v.selection.stroke = Stroke::new(1.0_f32,pal.accent);
     v.hyperlink_color = pal.cyan;
     v.widgets.noninteractive.bg_fill = pal.surface;
     v.widgets.inactive.bg_fill = pal.surface2;
     v.widgets.inactive.weak_bg_fill = pal.surface2;
-    v.widgets.inactive.fg_stroke = Stroke::new(1.0, pal.text2);
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32,pal.text2);
     v.widgets.hovered.bg_fill = pal.elevated;
-    v.widgets.hovered.fg_stroke = Stroke::new(1.0, pal.text);
+    v.widgets.hovered.fg_stroke = Stroke::new(1.0_f32,pal.text);
     v.widgets.active.bg_fill = pal.accent;
     let r = Rounding::same(8.0);
     for w in [
@@ -560,8 +565,10 @@ impl Dashboard {
             }
         };
 
+        use std::os::windows::process::CommandExt;
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pd-engine"));
         let mut cmd = Command::new(exe);
+        cmd.creation_flags(crate::CREATE_NO_WINDOW);
         cmd.arg("--mirror")
             .arg("--serial")
             .arg(serial)
@@ -640,7 +647,7 @@ impl Dashboard {
             };
             let resp = egui::Frame::default()
                 .fill(pal.surface)
-                .stroke(Stroke::new(1.0, stroke_col))
+                .stroke(Stroke::new(1.0_f32,stroke_col))
                 .rounding(Rounding::same(12.0))
                 .shadow(egui::epaint::Shadow {
                     offset: egui::vec2(0.0, dy),
@@ -923,7 +930,7 @@ impl eframe::App for Dashboard {
                     .show(ctx, |ui| {
                         egui::Frame::default()
                             .fill(fade(pal.surface2))
-                            .stroke(Stroke::new(1.0, fade(pal.border)))
+                            .stroke(Stroke::new(1.0_f32,fade(pal.border)))
                             .rounding(Rounding::same(10.0))
                             .shadow(egui::epaint::Shadow {
                                 offset: egui::vec2(0.0, 4.0),
@@ -955,7 +962,7 @@ fn device_card(ui: &mut egui::Ui, pal: &Palette, d: &Device, app: &mut Dashboard
         // Device-type icon (phone / tablet).
         egui::Frame::default()
             .fill(pal.surface2)
-            .stroke(Stroke::new(1.0, pal.border))
+            .stroke(Stroke::new(1.0_f32,pal.border))
             .rounding(Rounding::same(9.0))
             .inner_margin(egui::Margin::same(7.0))
             .show(ui, |ui| {
@@ -988,7 +995,7 @@ fn device_card(ui: &mut egui::Ui, pal: &Palette, d: &Device, app: &mut Dashboard
             } else if running {
                 let btn = egui::Button::new(icon_label(ic::POWER, "Stop", pal.live, pal.live))
                     .fill(pal.live_weak)
-                    .stroke(Stroke::new(1.0, pal.live))
+                    .stroke(Stroke::new(1.0_f32,pal.live))
                     .rounding(Rounding::same(8.0))
                     .min_size(egui::vec2(96.0, 34.0));
                 if ui.add(btn).clicked() {
@@ -1074,9 +1081,9 @@ fn device_card(ui: &mut egui::Ui, pal: &Palette, d: &Device, app: &mut Dashboard
         });
         ui.add_space(9.0);
         ui.horizontal(|ui| {
-            changed |= toggle_switch(ui, pal, &mut s.audio, ic::VOLUME, "Audio");
+            changed |= toggle_switch(ui, pal, &mut s.audio, ic::VOLUME, "Audio", "audio");
             ui.add_space(14.0);
-            changed |= toggle_switch(ui, pal, &mut s.input, ic::MOUSE, "Input");
+            changed |= toggle_switch(ui, pal, &mut s.input, ic::MOUSE, "Input", "input");
         });
     }
     changed
@@ -1087,7 +1094,7 @@ fn segmented_preset(ui: &mut egui::Ui, pal: &Palette, sel: &mut usize) -> bool {
     let mut changed = false;
     egui::Frame::default()
         .fill(pal.surface2)
-        .stroke(Stroke::new(1.0, pal.border))
+        .stroke(Stroke::new(1.0_f32,pal.border))
         .rounding(Rounding::same(9.0))
         .inner_margin(egui::Margin::same(3.0))
         .show(ui, |ui| {
@@ -1115,24 +1122,40 @@ fn segmented_preset(ui: &mut egui::Ui, pal: &Palette, sel: &mut usize) -> bool {
 }
 
 /// An iOS-style toggle switch with an icon + label. Returns true on change.
-fn toggle_switch(ui: &mut egui::Ui, pal: &Palette, on: &mut bool, ch: char, label: &str) -> bool {
-    let mut changed = false;
-    ui.horizontal(|ui| {
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(32.0, 18.0), egui::Sense::click());
-        if resp.clicked() {
-            *on = !*on;
-            changed = true;
-        }
-        let track = if *on { pal.accent } else { pal.switch_off };
-        ui.painter().rect_filled(rect, Rounding::same(9.0), track);
-        let kx = if *on { rect.right() - 9.0 } else { rect.left() + 9.0 };
-        ui.painter().circle_filled(egui::pos2(kx, rect.center().y), 6.5, pal.on_accent);
-        ui.add_space(7.0);
-        ui.label(icon_rt(ch, 13.0, pal.dim));
-        ui.add_space(1.0);
-        ui.label(RichText::new(label).color(pal.text2));
-    });
-    changed
+fn toggle_switch(
+    ui: &mut egui::Ui,
+    pal: &Palette,
+    on: &mut bool,
+    ch: char,
+    label: &str,
+    id_salt: &str,
+) -> bool {
+    // Explicit, serial-scoped id so identical switches across device cards never
+    // collide (an auto-id collision made the 2nd card's toggle unresponsive).
+    let id = ui.id().with(id_salt);
+    let row = ui
+        .horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(32.0, 18.0), egui::Sense::hover());
+            let track = if *on { pal.accent } else { pal.switch_off };
+            ui.painter().rect_filled(rect, Rounding::same(9.0), track);
+            let kx = if *on { rect.right() - 9.0 } else { rect.left() + 9.0 };
+            ui.painter().circle_filled(egui::pos2(kx, rect.center().y), 6.5, pal.on_accent);
+            ui.add_space(7.0);
+            ui.label(icon_rt(ch, 13.0, pal.dim));
+            ui.add_space(1.0);
+            ui.label(RichText::new(label).color(pal.text2));
+        })
+        .response;
+    // The whole row is the click target.
+    let resp = ui
+        .interact(row.rect, id, egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if resp.clicked() {
+        *on = !*on;
+        true
+    } else {
+        false
+    }
 }
 
 // ============================ shared views ============================
@@ -1161,7 +1184,7 @@ fn accent_rule(ui: &mut egui::Ui, pal: &Palette) {
 fn empty_state(ui: &mut egui::Ui, pal: &Palette) {
     egui::Frame::default()
         .fill(pal.surface)
-        .stroke(Stroke::new(1.0, pal.border))
+        .stroke(Stroke::new(1.0_f32,pal.border))
         .rounding(Rounding::same(12.0))
         .inner_margin(egui::Margin::same(18.0))
         .show(ui, |ui| {
@@ -1192,7 +1215,7 @@ fn action_btn(
     ui.add(
         egui::Button::new(icon_label(ch, label, text_col, text_col))
             .fill(fill)
-            .stroke(Stroke::new(1.0, pal.border))
+            .stroke(Stroke::new(1.0_f32,pal.border))
             .rounding(Rounding::same(8.0))
             .min_size(egui::vec2(0.0, 32.0)),
     )
@@ -1202,7 +1225,7 @@ fn action_btn(
 fn card(ui: &mut egui::Ui, pal: &Palette, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::default()
         .fill(pal.surface)
-        .stroke(Stroke::new(1.0, pal.border))
+        .stroke(Stroke::new(1.0_f32,pal.border))
         .rounding(Rounding::same(12.0))
         .inner_margin(egui::Margin::same(16.0))
         .show(ui, |ui| {
@@ -1321,7 +1344,12 @@ fn about_view(ui: &mut egui::Ui, pal: &Palette) {
 }
 
 fn list_devices() -> Vec<Device> {
-    let out = match Command::new(adb_path()).args(["devices", "-l"]).output() {
+    use std::os::windows::process::CommandExt;
+    let out = match Command::new(adb_path())
+        .creation_flags(crate::CREATE_NO_WINDOW)
+        .args(["devices", "-l"])
+        .output()
+    {
         Ok(o) => o,
         Err(_) => return Vec::new(),
     };
@@ -1370,7 +1398,9 @@ fn resolve_device_info(serial: &str, model: &str) -> (String, bool) {
                   getprop ro.product.odm.marketname; \
                   getprop ro.product.manufacturer; \
                   getprop ro.build.characteristics";
+    use std::os::windows::process::CommandExt;
     let out = Command::new(adb_path())
+        .creation_flags(crate::CREATE_NO_WINDOW)
         .args(["-s", serial, "shell", script])
         .output();
     let text = match out {

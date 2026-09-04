@@ -31,20 +31,32 @@ pub struct Session {
 }
 
 fn adb_path() -> PathBuf {
-    let bundled = Path::new(r"C:\platform-tools\adb.exe");
-    if bundled.exists() {
-        bundled.to_path_buf()
-    } else {
-        PathBuf::from("adb")
-    }
+    crate::adb_path()
 }
 
+/// Locate the pinned scrcpy server jar. Prefers a copy bundled next to the exe
+/// (portable/installed layout), then the dev checkout's `assets/server/`.
 fn server_jar() -> PathBuf {
-    PathBuf::from("assets/server/scrcpy-server-v3.3.1.jar")
+    const NAME: &str = "scrcpy-server-v3.3.1.jar";
+    let rel = Path::new("assets").join("server").join(NAME);
+    if let Some(dir) = crate::exe_dir() {
+        for c in [dir.join(NAME), dir.join(&rel)] {
+            if c.exists() {
+                return c;
+            }
+        }
+    }
+    // Dev fallback: relative to the current working directory.
+    if Path::new(NAME).exists() {
+        return PathBuf::from(NAME);
+    }
+    rel
 }
 
 fn adb_cmd(serial: &Option<String>) -> Command {
+    use std::os::windows::process::CommandExt;
     let mut c = Command::new(adb_path());
+    c.creation_flags(crate::CREATE_NO_WINDOW); // no flashing console for adb
     if let Some(s) = serial {
         c.arg("-s").arg(s);
     }
@@ -133,7 +145,7 @@ pub fn start(
         "send_frame_meta=true", // 12-byte header per AU: PTS + config/key flags + len
         "send_dummy_byte=false",
     ];
-    let mut child = adb_cmd(&serial)
+    let child = adb_cmd(&serial)
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
