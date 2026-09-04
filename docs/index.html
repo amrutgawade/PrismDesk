@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PrismDesk</title>
+<meta name="description" content="Low-latency Android screen mirroring & control for Windows. Free & open source.">
+<meta property="og:title" content="PrismDesk">
+<meta property="og:description" content="Your Android, mirrored to Windows — sharp, smooth, and instant.">
+<meta property="og:type" content="website">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+  :root{
+    --bg:#0a0b0e; --bg2:#0c0e12; --surface:#14161b; --surface2:#1b1e25;
+    --border:rgba(255,255,255,.08); --border2:rgba(255,255,255,.14);
+    --text:#eaecf1; --text2:#aab0bd; --dim:#7f8593;
+    --accent:#8b5cf6; --accent-weak:rgba(139,92,246,.14);
+    --cyan:#34e0d4; --live:#ef4444; --ok:#22c55e;
+    --maxw:1080px;
+    --sans:"Geist",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+    --mono:"Geist Mono",ui-monospace,"SF Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);
+    font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased;
+    background-image:
+      radial-gradient(60% 40% at 78% -5%, rgba(139,92,246,.14), transparent 70%),
+      radial-gradient(50% 35% at 8% 4%, rgba(52,224,212,.09), transparent 70%);
+  }
+  a{color:inherit;text-decoration:none}
+  .mono{font-family:var(--mono)}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 24px}
+  h1,h2,h3{margin:0;letter-spacing:-.02em;text-wrap:balance;font-weight:700}
+  section{padding:96px 0}
+  .eyebrow{font-size:12px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan)}
+
+  /* nav */
+  nav{position:sticky;top:0;z-index:50;backdrop-filter:blur(12px);
+    background:rgba(10,11,14,.72);border-bottom:1px solid var(--border)}
+  .nav-in{max-width:var(--maxw);margin:0 auto;padding:14px 24px;display:flex;align-items:center;gap:18px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:17px;letter-spacing:-.01em}
+  .diamond{width:16px;height:16px;transform:rotate(45deg);border-radius:3px;
+    background:linear-gradient(135deg,var(--cyan),var(--accent));box-shadow:0 0 16px -2px var(--accent)}
+  .nav-links{margin-left:auto;display:flex;align-items:center;gap:8px}
+  .nav-links a{color:var(--text2);font-size:14px;font-weight:500;padding:8px 12px;border-radius:8px}
+  .nav-links a:hover{color:var(--text)}
+  .btn{display:inline-flex;align-items:center;gap:8px;font-weight:600;font-size:14px;
+    padding:10px 16px;border-radius:10px;border:1px solid transparent;cursor:pointer;transition:.16s}
+  .btn svg{width:16px;height:16px}
+  .btn-primary{background:var(--accent);color:#fff;box-shadow:0 8px 24px -10px var(--accent)}
+  .btn-primary:hover{filter:brightness(1.08);transform:translateY(-1px)}
+  .btn-ghost{border-color:var(--border2);color:var(--text)}
+  .btn-ghost:hover{background:var(--surface2)}
+
+  /* hero */
+  header{padding:72px 0 40px;text-align:center}
+  .badges{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-bottom:26px}
+  .pill{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:500;color:var(--text2);
+    background:var(--surface);border:1px solid var(--border);border-radius:999px;padding:5px 12px}
+  .pill .dot{width:6px;height:6px;border-radius:50%;background:var(--ok)}
+  h1.hero{font-size:clamp(38px,6.4vw,68px);font-weight:800;line-height:1.02;letter-spacing:-.035em;max-width:16ch;margin:0 auto}
+  .grad{background:linear-gradient(100deg,var(--cyan),var(--accent));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{color:var(--text2);font-size:clamp(16px,2vw,20px);max-width:56ch;margin:22px auto 32px;line-height:1.55}
+  .cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+  .cta .btn{padding:13px 22px;font-size:15px}
+  .under-cta{margin-top:16px;font-size:13px;color:var(--dim)}
+  .under-cta .mono{color:var(--text2)}
+
+  /* prism */
+  .prism-stage{margin:52px auto 0;max-width:760px}
+  .prism-stage svg{width:100%;height:auto;display:block}
+
+  /* product preview window */
+  .preview{margin:56px auto 0;max-width:520px;border:1px solid var(--border);border-radius:16px;
+    background:var(--surface);box-shadow:0 40px 80px -40px rgba(0,0,0,.9),0 0 0 1px rgba(255,255,255,.02);overflow:hidden}
+  .pv-bar{display:flex;align-items:center;gap:7px;padding:11px 14px;border-bottom:1px solid var(--border);
+    background:linear-gradient(180deg,rgba(255,255,255,.02),transparent)}
+  .pv-bar i{width:10px;height:10px;border-radius:50%;display:block}
+  .pv-body{padding:18px;text-align:left}
+  .pv-head{display:flex;align-items:center;gap:9px}
+  .pv-rule{height:2px;border-radius:2px;margin:12px 0;background:linear-gradient(90deg,var(--cyan),var(--accent))}
+  .pv-card{position:relative;border:1px solid rgba(139,92,246,.4);border-radius:12px;background:var(--surface);
+    padding:14px;box-shadow:0 10px 30px -18px #000}
+  .pv-card::before{content:"";position:absolute;left:0;top:12px;bottom:12px;width:3px;border-radius:0 3px 3px 0;
+    background:linear-gradient(180deg,var(--cyan),var(--accent))}
+  .pv-devico{width:34px;height:34px;border-radius:9px;border:1px solid var(--border);background:var(--surface2);
+    display:grid;place-items:center;color:var(--text2)}
+  .pv-badge{font-size:10px;font-weight:600;letter-spacing:.04em;color:var(--cyan);
+    background:rgba(52,224,212,.13);border:1px solid rgba(52,224,212,.3);border-radius:999px;padding:2px 7px}
+  .pv-ctl{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;color:var(--text2);
+    background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:7px 10px}
+  .pv-ctl svg{width:14px;height:14px}
+  .pv-rec{color:var(--live);background:rgba(239,68,68,.13);border-color:rgba(239,68,68,.35)}
+
+  /* features */
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  .feat{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:20px;transition:.18s}
+  .feat:hover{border-color:var(--border2);transform:translateY(-2px);box-shadow:0 20px 40px -28px #000}
+  .feat .ic{width:38px;height:38px;border-radius:10px;background:var(--accent-weak);color:var(--accent);
+    display:grid;place-items:center;margin-bottom:14px}
+  .feat .ic svg{width:19px;height:19px}
+  .feat h3{font-size:16px;font-weight:600}
+  .feat p{margin:6px 0 0;color:var(--text2);font-size:14px;line-height:1.5}
+  .sec-head{max-width:60ch;margin-bottom:36px}
+  .sec-head h2{font-size:clamp(28px,4vw,40px);margin-top:12px;letter-spacing:-.03em}
+  .sec-head p{color:var(--text2);font-size:17px;margin:14px 0 0}
+
+  /* under the hood */
+  .tech{background:linear-gradient(180deg,var(--bg2),var(--bg));border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+  .pillars{display:grid;grid-template-columns:repeat(3,1fr);gap:22px}
+  .pillar{border-left:2px solid;border-image:linear-gradient(180deg,var(--cyan),var(--accent)) 1;padding:4px 0 4px 18px}
+  .pillar h3{font-size:17px;font-weight:600}
+  .pillar p{color:var(--text2);font-size:14.5px;margin:8px 0 0}
+  .pillar .k{font-family:var(--mono);font-size:12px;color:var(--cyan);letter-spacing:.02em}
+
+  /* download */
+  .dl{background:
+      radial-gradient(70% 120% at 50% 0%, rgba(139,92,246,.16), transparent 70%),var(--surface);
+    border:1px solid var(--border);border-radius:20px;padding:44px;text-align:center;margin-top:8px}
+  .dl h2{font-size:clamp(26px,3.6vw,36px);letter-spacing:-.03em}
+  .dl p{color:var(--text2);margin:14px auto 26px;max-width:52ch}
+  .req{display:flex;gap:10px 22px;justify-content:center;flex-wrap:wrap;margin-top:26px;
+    font-size:13.5px;color:var(--dim)}
+  .req b{color:var(--text2);font-weight:600}
+  .note{margin-top:20px;font-size:12.5px;color:var(--dim);max-width:60ch;margin-left:auto;margin-right:auto}
+
+  /* footer */
+  footer{border-top:1px solid var(--border);padding:52px 0 40px;color:var(--dim);font-size:14px}
+  .foot-top{display:flex;flex-wrap:wrap;gap:24px;align-items:flex-start;justify-content:space-between}
+  .foot-links{display:flex;gap:10px;flex-wrap:wrap}
+  .foot-links a{display:inline-flex;align-items:center;gap:8px;color:var(--text2);
+    border:1px solid var(--border);border-radius:10px;padding:9px 13px;font-size:13.5px;font-weight:500;transition:.16s}
+  .foot-links a:hover{color:var(--text);border-color:var(--border2);background:var(--surface)}
+  .foot-links svg{width:15px;height:15px}
+  .coffee:hover{border-color:rgba(255,221,0,.5)!important}
+  .foot-bottom{margin-top:30px;padding-top:22px;border-top:1px solid var(--border);
+    display:flex;flex-wrap:wrap;gap:12px;justify-content:space-between;font-size:12.5px;line-height:1.6}
+  .foot-bottom a{color:var(--text2)} .foot-bottom a:hover{color:var(--text)}
+
+  @media(max-width:820px){
+    .grid,.pillars{grid-template-columns:1fr 1fr}
+    section{padding:72px 0}
+  }
+  @media(max-width:560px){
+    .grid,.pillars{grid-template-columns:1fr}
+    .nav-links a:not(.btn){display:none}
+    .dl{padding:30px 20px}
+  }
+  @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;scroll-behavior:auto}}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-in">
+    <a class="brand" href="#top"><span class="diamond"></span>PrismDesk</a>
+    <div class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#tech">How it works</a>
+      <a href="https://github.com/amrutgawade/PrismDesk" target="_blank" rel="noopener">GitHub</a>
+      <a class="btn btn-primary" href="#download">Download</a>
+    </div>
+  </div>
+</nav>
+
+<header id="top">
+  <div class="wrap">
+    <div class="badges">
+      <span class="pill"><span class="dot"></span>Free &amp; open source</span>
+      <span class="pill">Windows 10 / 11</span>
+      <span class="pill mono">v0.1.0</span>
+    </div>
+    <h1 class="hero">Your Android, mirrored to Windows — <span class="grad">sharp, smooth, instant.</span></h1>
+    <p class="sub">A premium, low-latency screen mirror and control app. Hardware-decoded on your GPU and presented flip-model, so what you see is as close to real-time as Windows gets.</p>
+    <div class="cta">
+      <a class="btn btn-primary" href="#download">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+        Download for Windows
+      </a>
+      <a class="btn btn-ghost" href="https://github.com/amrutgawade/PrismDesk" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.58 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.1.68-.22.68-.49 0-.24-.01-.87-.01-1.71-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.49-1.11-1.49-.91-.63.07-.62.07-.62 1 .07 1.53 1.06 1.53 1.06.89 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.63-1.37-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.28 2.75 1.05a9.3 9.3 0 0 1 5 0c1.91-1.33 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.34 4.79-4.57 5.05.36.32.68.94.68 1.9 0 1.37-.01 2.48-.01 2.82 0 .27.18.6.69.49A10.26 10.26 0 0 0 22 12.25C22 6.58 17.52 2 12 2Z"/></svg>
+        View on GitHub
+      </a>
+    </div>
+    <p class="under-cta">Connect over USB, click <span class="mono">Start Mirror</span> — you're in. adb is bundled; nothing else to install.</p>
+
+    <!-- prism refraction: a white beam split into the cyan→violet spectrum -->
+    <div class="prism-stage" aria-hidden="true">
+      <svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="beam" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="#ffffff" stop-opacity="0"/>
+            <stop offset="1" stop-color="#ffffff" stop-opacity=".9"/>
+          </linearGradient>
+          <linearGradient id="glass" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#34e0d4" stop-opacity=".25"/>
+            <stop offset="1" stop-color="#8b5cf6" stop-opacity=".25"/>
+          </linearGradient>
+          <filter id="soft"><feGaussianBlur stdDeviation="3"/></filter>
+        </defs>
+        <!-- incoming beam -->
+        <rect x="40" y="148" width="300" height="3" fill="url(#beam)"/>
+        <!-- spectrum fan out of the prism apex -->
+        <g filter="url(#soft)" opacity=".95">
+          <polygon points="382,150 748,86 748,92 382,150" fill="#34e0d4"/>
+          <polygon points="382,150 748,104 748,110 382,150" fill="#22d3ee"/>
+          <polygon points="382,150 748,122 748,128 382,150" fill="#60a5fa"/>
+          <polygon points="382,150 748,140 748,146 382,150" fill="#818cf8"/>
+          <polygon points="382,150 748,158 748,164 382,150" fill="#a78bfa"/>
+          <polygon points="382,150 748,176 748,182 382,150" fill="#8b5cf6"/>
+          <polygon points="382,150 748,194 748,200 382,150" fill="#7c3aed"/>
+        </g>
+        <!-- glass prism -->
+        <polygon points="360,205 384,96 452,196" fill="url(#glass)" stroke="rgba(255,255,255,.5)" stroke-width="1.5" stroke-linejoin="round"/>
+      </svg>
+    </div>
+
+    <!-- product preview -->
+    <div class="preview" role="img" aria-label="PrismDesk dashboard preview showing a POCO X6 Pro 5G mirroring">
+      <div class="pv-bar"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+      <div class="pv-body">
+        <div class="pv-head">
+          <span class="diamond" style="width:13px;height:13px"></span>
+          <b style="font-size:15px">PrismDesk</b>
+          <span class="pv-badge" style="color:var(--accent);background:var(--accent-weak);border-color:transparent">v0.1</span>
+          <span style="margin-left:auto;color:var(--dim);font-size:12px">1 device</span>
+        </div>
+        <div class="pv-rule"></div>
+        <div class="pv-card">
+          <div style="display:flex;gap:11px;align-items:flex-start">
+            <div class="pv-devico">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="20" x="5" y="2" rx="2.5"/><path d="M12 18h.01"/></svg>
+            </div>
+            <div style="flex:1">
+              <div style="display:flex;align-items:center;gap:7px">
+                <span style="width:7px;height:7px;border-radius:50%;background:var(--cyan);display:inline-block"></span>
+                <b style="font-size:15px">POCO X6 Pro 5G</b>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;margin-top:5px">
+                <span class="pv-badge">USB</span>
+                <span class="mono" style="font-size:11.5px;color:var(--dim)">2311DRK48I</span>
+              </div>
+            </div>
+            <span class="pv-ctl" style="color:var(--live);border-color:rgba(239,68,68,.4);background:transparent">Stop</span>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:12px">
+            <span class="pv-ctl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>Snapshot</span>
+            <span class="pv-ctl pv-rec"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>0:14</span>
+            <span class="pv-ctl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/></svg>Mute</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<section id="features">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Everything you need</span>
+      <h2>A full control plane, not just a screen cast.</h2>
+      <p>Mirror, control, capture, and record — from a minimal window OBS can grab, with per-device settings that persist.</p>
+    </div>
+    <div class="grid">
+      <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div><h3>Instant USB mirror</h3><p>Plug in, click Start Mirror, and your screen is live in a dedicated window — no setup, no accounts.</p></div>
+      <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg></div><h3>Built for low latency</h3><p>Present-on-arrival, drop-to-latest, and a frame-latency-1 swapchain so lag can never accumulate.</p></div>
+      <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/></svg></div><h3>Full control</h3><p>Mouse taps &amp; swipes, wheel scroll, right-click Back, and real keyboard input — type straight into the phone.</p></div>
+      <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/></svg></div><h3>Device audio</h3><p>Hear your phone through your PC in sync with the video, with a one-key mute toggle.</p></div>
+      <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="14" rx="2"/><path d="m10 10 5 3-5 3v-6z"/></svg></div><h3>Record &amp; snapshot</h3><p>Ctrl+R records MP4 with audio; Ctrl+S grabs a full-resolution PNG — or trigger both from the dashboard.</p></div>
+      <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="14" x="8" y="6" rx="1.5"/><path d="M16 6V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2M8 20v0a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2"/></svg></div><h3>Two-way clipboard</h3><p>Copy on the phone and paste on the PC — and Ctrl+V the other way. Text just flows both directions.</p></div>
+      <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="18" x="3" y="3" rx="1.5"/><rect width="7" height="18" x="14" y="3" rx="1.5"/></svg></div><h3>Multiple devices</h3><p>Mirror several phones at once, each in its own window with independent capture controls.</p></div>
+      <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg></div><h3>Auto-reconnect</h3><p>Unplug, sleep, or wander out of range — the window stays put and resumes the moment it's back.</p></div>
+      <div class="feat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg></div><h3>Quality presets</h3><p>Balanced, Crisp, or Low-latency — tune resolution, bitrate, and fps per device. Your choices are remembered.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="tech" class="tech">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Under the hood</span>
+      <h2>Engineered for the shortest path to your screen.</h2>
+      <p>No FFmpeg, no jitter buffer, no browser in the middle. Just a tight native pipeline from the phone's encoder to your monitor.</p>
+    </div>
+    <div class="pillars">
+      <div class="pillar">
+        <div class="k">Media Foundation · NVDEC</div>
+        <h3>Hardware decode</h3>
+        <p>H.264/H.265 is decoded on the GPU straight to NV12 textures that never leave VRAM — one copy, then a BT.709 shader.</p>
+      </div>
+      <div class="pillar">
+        <div class="k">D3D11 · flip-model</div>
+        <h3>Zero-lag presentation</h3>
+        <p>A flip-model waitable swapchain with maximum frame latency of 1, pinned to your NVIDIA GPU and VRR-aware.</p>
+      </div>
+      <div class="pillar">
+        <div class="k">scrcpy · adb reverse</div>
+        <h3>Direct USB transport</h3>
+        <p>A scrcpy-compatible reverse tunnel streams frames over USB with no jitter buffer, so nothing sits between capture and decode.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="download">
+  <div class="wrap">
+    <div class="dl">
+      <h2>Download PrismDesk</h2>
+      <p>Free, open source, and ready to run. Grab the installer or the portable build from GitHub Releases.</p>
+      <div class="cta">
+        <a class="btn btn-primary" href="https://github.com/amrutgawade/PrismDesk/releases/latest" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+          Get the latest release
+        </a>
+        <a class="btn btn-ghost" href="https://github.com/amrutgawade/PrismDesk" target="_blank" rel="noopener">Browse the source</a>
+      </div>
+      <div class="req">
+        <span><b>Windows 10 / 11</b> (64-bit)</span>
+        <span><b>NVIDIA GPU</b> · GTX 1650 or newer</span>
+        <span><b>USB debugging</b> enabled · adb bundled</span>
+      </div>
+      <p class="note">Installer and portable ZIP both included. The build is currently unsigned, so on first launch Windows SmartScreen may say “Unknown publisher” — click <b>More info → Run anyway</b>.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="foot-top">
+      <div>
+        <div class="brand" style="font-size:18px"><span class="diamond"></span>PrismDesk</div>
+        <p style="margin:12px 0 0;max-width:34ch;color:var(--text2);font-size:14px">Low-latency Android screen mirroring &amp; control for Windows.</p>
+      </div>
+      <div class="foot-links">
+        <a href="https://github.com/amrutgawade/PrismDesk" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.58 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.1.68-.22.68-.49 0-.24-.01-.87-.01-1.71-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.49-1.11-1.49-.91-.63.07-.62.07-.62 1 .07 1.53 1.06 1.53 1.06.89 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.63-1.37-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.28 2.75 1.05a9.3 9.3 0 0 1 5 0c1.91-1.33 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.34 4.79-4.57 5.05.36.32.68.94.68 1.9 0 1.37-.01 2.48-.01 2.82 0 .27.18.6.69.49A10.26 10.26 0 0 0 22 12.25C22 6.58 17.52 2 12 2Z"/></svg>
+          Star on GitHub
+        </a>
+        <a href="https://amrut.is-a.dev" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 0 20 15 15 0 0 1 0-20z"/></svg>
+          Portfolio
+        </a>
+        <a class="coffee" href="https://buymeacoffee.com/amrutgawade" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 8h1a4 4 0 0 1 0 8h-1"/><path d="M3 8h14v9a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4V8z"/><path d="M6 2v2M10 2v2M14 2v2"/></svg>
+          Buy me a coffee
+        </a>
+      </div>
+    </div>
+    <div class="foot-bottom">
+      <span>Designed &amp; built by <a href="https://amrut.is-a.dev" target="_blank" rel="noopener" style="color:var(--accent);font-weight:600">Amrut Gawade</a> · Support: <a href="mailto:webdeveloper.amrut@gmail.com">webdeveloper.amrut@gmail.com</a></span>
+      <span>Bundles scrcpy (Apache-2.0), Geist (OFL-1.1), Lucide (ISC), adb. Not affiliated with Google or Genymobile.</span>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
