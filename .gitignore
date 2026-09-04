@@ -27,3 +27,4 @@ desktop.ini
 
 # packaging output
 /dist/
+/tools/bin/
