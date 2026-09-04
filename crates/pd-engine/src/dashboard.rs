@@ -42,6 +42,8 @@ struct Palette {
     warn: Color32,
     on_accent: Color32,
     extreme: Color32,
+    shadow: Color32,
+    switch_off: Color32,
 }
 
 impl Palette {
@@ -73,6 +75,8 @@ impl Palette {
             warn: rgb(0xd9, 0xa2, 0x1b),
             on_accent: rgb(0xff, 0xff, 0xff),
             extreme: rgb(0x0a, 0x0c, 0x0f),
+            shadow: Color32::from_black_alpha(120),
+            switch_off: rgb(0x3a, 0x40, 0x49),
         }
     }
 
@@ -96,6 +100,8 @@ impl Palette {
             warn: rgb(0xb4, 0x53, 0x09),
             on_accent: rgb(0xff, 0xff, 0xff),
             extreme: rgb(0xff, 0xff, 0xff),
+            shadow: Color32::from_black_alpha(30),
+            switch_off: rgb(0xd1, 0xd5, 0xdb),
         }
     }
 }
@@ -121,11 +127,14 @@ mod ic {
     pub const PLAY: char = '\u{e13c}';
     pub const POWER: char = '\u{e140}';
     pub const MONITOR: char = '\u{e11d}';
+    pub const SMARTPHONE: char = '\u{e163}';
+    pub const TABLET: char = '\u{e17e}';
     pub const REFRESH: char = '\u{e145}';
     pub const SUN: char = '\u{e178}';
     pub const MOON: char = '\u{e11e}';
     pub const KEYBOARD: char = '\u{e284}';
     pub const INFO: char = '\u{e0f9}';
+    pub const MOUSE: char = '\u{e11f}';
     pub const SLIDERS: char = '\u{e29a}';
 }
 
@@ -219,7 +228,9 @@ fn adb_path() -> PathBuf {
 #[derive(Clone)]
 struct Device {
     serial: String,
-    model: String,
+    model: String,       // model code, e.g. "2311DRK48I"
+    name: String,        // marketing name, e.g. "POCO X6 Pro 5G" (falls back to model)
+    is_tablet: bool,
     authorized: bool,
 }
 
@@ -477,6 +488,7 @@ struct Dashboard {
     egui_ctx: Option<egui::Context>, // for repainting when a mirror reports status
     dark: bool,
     pal: Palette,
+    dev_info: HashMap<String, (String, bool)>, // serial -> (marketing name, is_tablet)
 }
 
 impl Dashboard {
@@ -492,13 +504,27 @@ impl Dashboard {
             egui_ctx: None,
             dark,
             pal: Palette::new(dark),
+            dev_info: HashMap::new(),
         };
         d.refresh();
         d
     }
 
     fn refresh(&mut self) {
-        self.devices = list_devices();
+        let mut devices = list_devices();
+        // Resolve friendly names once per device (cached); patch each Device.
+        for d in &mut devices {
+            if !d.authorized {
+                continue;
+            }
+            let info = self
+                .dev_info
+                .entry(d.serial.clone())
+                .or_insert_with(|| resolve_device_info(&d.serial, &d.model));
+            d.name = info.0.clone();
+            d.is_tablet = info.1;
+        }
+        self.devices = devices;
         // Drop mirrors whose window the user closed (child exited).
         self.running
             .retain(|_, p| matches!(p.child.try_wait(), Ok(None)));
@@ -769,17 +795,38 @@ impl eframe::App for Dashboard {
                 }
 
                 for d in &devices {
+                    let live = self.running.contains_key(&d.serial);
                     // Scope every widget in this card by the device serial so
                     // identical buttons/combos across cards get unique egui ids.
                     ui.push_id(&d.serial, |ui| {
-                        egui::Frame::default()
+                        let stroke_col = if live {
+                            lerp_color(pal.border, pal.accent, 0.55)
+                        } else {
+                            pal.border
+                        };
+                        let resp = egui::Frame::default()
                             .fill(pal.surface)
-                            .stroke(Stroke::new(1.0, pal.border))
+                            .stroke(Stroke::new(1.0, stroke_col))
                             .rounding(Rounding::same(12.0))
+                            .shadow(egui::epaint::Shadow {
+                                offset: egui::vec2(0.0, 3.0),
+                                blur: 16.0,
+                                spread: -4.0,
+                                color: pal.shadow,
+                            })
                             .inner_margin(egui::Margin::same(14.0))
                             .show(ui, |ui| {
                                 config_changed |= device_card(ui, &pal, d, self);
                             });
+                        // Live devices get a cyan→violet accent rail on the left edge.
+                        if live {
+                            let r = resp.response.rect;
+                            let rail = egui::Rect::from_min_max(
+                                egui::pos2(r.left(), r.top() + 12.0),
+                                egui::pos2(r.left() + 3.0, r.bottom() - 12.0),
+                            );
+                            ui.painter().rect_filled(rail, Rounding::same(2.0), pal.accent);
+                        }
                     });
                     ui.add_space(10.0);
                 }
@@ -807,8 +854,25 @@ fn device_card(ui: &mut egui::Ui, pal: &Palette, d: &Device, app: &mut Dashboard
     let running = app.running.contains_key(&d.serial);
 
     ui.horizontal(|ui| {
+        // Device-type icon (phone / tablet).
+        egui::Frame::default()
+            .fill(pal.surface2)
+            .stroke(Stroke::new(1.0, pal.border))
+            .rounding(Rounding::same(9.0))
+            .inner_margin(egui::Margin::same(7.0))
+            .show(ui, |ui| {
+                let ch = if d.is_tablet { ic::TABLET } else { ic::SMARTPHONE };
+                ui.label(icon_rt(ch, 18.0, pal.text2));
+            });
+        ui.add_space(4.0);
         ui.vertical(|ui| {
-            ui.label(sb(&d.model, 15.5, pal.text));
+            ui.horizontal(|ui| {
+                if running {
+                    let (dot, _) = ui.allocate_exact_size(egui::vec2(7.0, 8.0), egui::Sense::hover());
+                    ui.painter().circle_filled(dot.center(), 3.5, pal.cyan);
+                }
+                ui.label(sb(&d.name, 15.5, pal.text));
+            });
             ui.add_space(3.0);
             ui.horizontal(|ui| {
                 pill(
@@ -816,7 +880,8 @@ fn device_card(ui: &mut egui::Ui, pal: &Palette, d: &Device, app: &mut Dashboard
                     RichText::new("USB").small().color(pal.cyan),
                     pal.cyan_weak,
                 );
-                ui.label(RichText::new(&d.serial).monospace().small().color(pal.dim));
+                ui.label(RichText::new(&d.model).monospace().small().color(pal.dim))
+                    .on_hover_text(&d.serial);
             });
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -899,24 +964,69 @@ fn device_card(ui: &mut egui::Ui, pal: &Palette, d: &Device, app: &mut Dashboard
         let s = app.settings.entry(d.serial.clone()).or_default();
         ui.horizontal(|ui| {
             ui.label(icon_rt(ic::SLIDERS, 14.0, pal.dim));
-            egui::ComboBox::from_id_salt(("preset", d.serial.as_str()))
-                .selected_text(PRESET_LABELS[s.preset])
-                .width(116.0)
-                .show_ui(ui, |ui| {
-                    for (i, label) in PRESET_LABELS.iter().enumerate() {
-                        if ui.selectable_value(&mut s.preset, i, *label).clicked() {
-                            changed = true;
-                        }
-                    }
-                });
-            if ui.checkbox(&mut s.audio, RichText::new("Audio").color(pal.text2)).changed() {
-                changed = true;
-            }
-            if ui.checkbox(&mut s.input, RichText::new("Input").color(pal.text2)).changed() {
-                changed = true;
-            }
+            ui.add_space(2.0);
+            changed |= segmented_preset(ui, pal, &mut s.preset);
+        });
+        ui.add_space(9.0);
+        ui.horizontal(|ui| {
+            changed |= toggle_switch(ui, pal, &mut s.audio, ic::VOLUME, "Audio");
+            ui.add_space(14.0);
+            changed |= toggle_switch(ui, pal, &mut s.input, ic::MOUSE, "Input");
         });
     }
+    changed
+}
+
+/// A shadcn-style segmented control for the quality preset. Returns true on change.
+fn segmented_preset(ui: &mut egui::Ui, pal: &Palette, sel: &mut usize) -> bool {
+    let mut changed = false;
+    egui::Frame::default()
+        .fill(pal.surface2)
+        .stroke(Stroke::new(1.0, pal.border))
+        .rounding(Rounding::same(9.0))
+        .inner_margin(egui::Margin::same(3.0))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.horizontal(|ui| {
+                for (i, label) in PRESET_LABELS.iter().enumerate() {
+                    let on = *sel == i;
+                    let (fill, txt) = if on {
+                        (pal.elevated, pal.text)
+                    } else {
+                        (Color32::TRANSPARENT, pal.dim)
+                    };
+                    let btn = egui::Button::new(RichText::new(*label).size(12.0).color(txt))
+                        .fill(fill)
+                        .rounding(Rounding::same(6.0))
+                        .min_size(egui::vec2(0.0, 24.0));
+                    if ui.add(btn).clicked() && !on {
+                        *sel = i;
+                        changed = true;
+                    }
+                }
+            });
+        });
+    changed
+}
+
+/// An iOS-style toggle switch with an icon + label. Returns true on change.
+fn toggle_switch(ui: &mut egui::Ui, pal: &Palette, on: &mut bool, ch: char, label: &str) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(32.0, 18.0), egui::Sense::click());
+        if resp.clicked() {
+            *on = !*on;
+            changed = true;
+        }
+        let track = if *on { pal.accent } else { pal.switch_off };
+        ui.painter().rect_filled(rect, Rounding::same(9.0), track);
+        let kx = if *on { rect.right() - 9.0 } else { rect.left() + 9.0 };
+        ui.painter().circle_filled(egui::pos2(kx, rect.center().y), 6.5, pal.on_accent);
+        ui.add_space(7.0);
+        ui.label(icon_rt(ch, 13.0, pal.dim));
+        ui.add_space(1.0);
+        ui.label(RichText::new(label).color(pal.text2));
+    });
     changed
 }
 
@@ -1123,10 +1233,52 @@ fn list_devices() -> Vec<Device> {
             .map(|m| m.replace('_', " "))
             .unwrap_or_else(|| "Android device".to_string());
         devices.push(Device {
+            name: model.clone(), // patched to the marketing name once resolved
             serial,
             model,
+            is_tablet: false,
             authorized,
         });
     }
     devices
+}
+
+/// Resolve a device's friendly marketing name + whether it's a tablet via a
+/// single `adb shell` round-trip (several getprop reads in order). Falls back to
+/// manufacturer + model, then the bare model code. Only call for authorized
+/// devices; the result is cached per serial so this runs once per device.
+fn resolve_device_info(serial: &str, model: &str) -> (String, bool) {
+    // Order matters: first non-empty marketing prop wins.
+    let script = "getprop ro.product.marketname; \
+                  getprop ro.vendor.oplus.market.name; \
+                  getprop ro.product.realme.marketname; \
+                  getprop ro.oppo.market.name; \
+                  getprop ro.config.marketing_name; \
+                  getprop ro.product.vendor.marketname; \
+                  getprop ro.product.odm.marketname; \
+                  getprop ro.product.manufacturer; \
+                  getprop ro.build.characteristics";
+    let out = Command::new(adb_path())
+        .args(["-s", serial, "shell", script])
+        .output();
+    let text = match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+        Err(_) => String::new(),
+    };
+    let lines: Vec<String> = text.lines().map(|l| l.trim().to_string()).collect();
+    let name = lines
+        .iter()
+        .take(7)
+        .find(|l| !l.is_empty())
+        .cloned()
+        .unwrap_or_else(|| {
+            let manuf = lines.get(7).cloned().unwrap_or_default();
+            if !manuf.is_empty() && !manuf.eq_ignore_ascii_case("unknown") {
+                format!("{manuf} {model}")
+            } else {
+                model.to_string()
+            }
+        });
+    let is_tablet = lines.get(8).map(|c| c.contains("tablet")).unwrap_or(false);
+    (name, is_tablet)
 }
