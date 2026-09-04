@@ -1313,6 +1313,23 @@ fn about_view(ui: &mut egui::Ui, pal: &Palette) {
             ui.hyperlink_to(sb("Amrut Gawade", 13.0, pal.accent), "https://amrut.is-a.dev/")
                 .on_hover_text("amrut.is-a.dev");
         });
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.hyperlink_to(
+                RichText::new("Website").small().color(pal.cyan),
+                "https://amrutgawade.github.io/PrismDesk/",
+            );
+            ui.label(RichText::new("·").small().color(pal.dim));
+            ui.hyperlink_to(
+                RichText::new("GitHub").small().color(pal.cyan),
+                "https://github.com/amrutgawade/PrismDesk",
+            );
+            ui.label(RichText::new("·").small().color(pal.dim));
+            ui.hyperlink_to(
+                RichText::new("Support").small().color(pal.cyan),
+                "mailto:webdeveloper.amrut@gmail.com",
+            );
+        });
     });
     card(ui, pal, |ui| {
         ui.label(sb("Open-source components", 14.0, pal.text));
